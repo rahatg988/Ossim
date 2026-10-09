@@ -1,0 +1,2360 @@
+import 'dart:convert';
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+// ---------------------------------------------------------------
+// ধ্রুবক
+// ---------------------------------------------------------------
+const List<String> kMonths = [
+  'জানুয়ারি',
+  'ফেব্রুয়ারি',
+  'মার্চ',
+  'এপ্রিল',
+  'মে',
+  'জুন',
+  'জুলাই',
+  'আগস্ট',
+  'সেপ্টেম্বর',
+  'অক্টোবর',
+  'নভেম্বর',
+  'ডিসেম্বর',
+];
+const List<String> kWeekdays = [
+  'রবি',
+  'সোম',
+  'মঙ্গল',
+  'বুধ',
+  'বৃহস্পতি',
+  'শুক্র',
+  'শনি',
+];
+
+// মিলের একদিন শুরু হয় দুপুরে: দুপুর + রাত + পরদিন সকাল
+const List<String> kCycleKeys = ['l', 'd', 'b'];
+const List<String> kCycleNames = ['দুপুর', 'রাত', 'সকাল'];
+
+const List<String> kYears = [
+  'HSC',
+  '1st year',
+  '2nd year',
+  '3rd year',
+  'Final year',
+  "Master's",
+];
+
+const int kPeriodDays = 4;
+
+// খাবারের সময়-সূচি: [শুরু, শেষ] মিনিটে (রাত ১২টা থেকে)
+// শেষের সময়গুলো আনুমানিক দেওয়া আছে, ম্যানেজার সেটিংস থেকে বদলাবেন
+const Map<String, List<int>> kDefaultSchedule = {
+  'b': [8 * 60 + 40, 9 * 60 + 40],
+  'l': [13 * 60 + 45, 14 * 60 + 45],
+  'd': [20 * 60 + 15, 21 * 60 + 15],
+};
+
+Map<String, List<int>> copyDefaultSchedule() => {
+      for (final e in kDefaultSchedule.entries)
+        e.key: List<int>.from(e.value),
+    };
+
+// ---------------------------------------------------------------
+// অ্যাপের সাধারণ তথ্য (ফোনে সেভ থাকে)
+// ---------------------------------------------------------------
+Map<String, List<int>> kSchedule = copyDefaultSchedule();
+String kManagerPin = '1234';
+String kManagerRoom = '';
+String kPeriodStart = '';
+bool kDark = false;
+List<Map<String, String>> kNotices = [];
+
+Future<void> putString(String key, String value) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setString(key, value);
+}
+
+Future<void> saveSchedule() => putString('schedule', jsonEncode(kSchedule));
+Future<void> savePin() => putString('managerPin', kManagerPin);
+Future<void> saveRoom() => putString('managerRoom', kManagerRoom);
+Future<void> savePeriodStart() => putString('periodStart', kPeriodStart);
+Future<void> saveNotices() => putString('notices', jsonEncode(kNotices));
+Future<void> saveDark() async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('dark', kDark);
+}
+
+Future<void> loadAppData() async {
+  final prefs = await SharedPreferences.getInstance();
+  kManagerPin = prefs.getString('managerPin') ?? '1234';
+  kManagerRoom = prefs.getString('managerRoom') ?? '';
+  kDark = prefs.getBool('dark') ?? false;
+
+  final ps = prefs.getString('periodStart');
+  if (ps == null) {
+    kPeriodStart = isoOf(todayDate());
+    await savePeriodStart();
+  } else {
+    kPeriodStart = ps;
+  }
+
+  final n = prefs.getString('notices');
+  if (n != null) {
+    kNotices = (jsonDecode(n) as List)
+        .map((e) => Map<String, String>.from(e as Map))
+        .toList();
+  }
+
+  final sc = prefs.getString('schedule');
+  if (sc != null) {
+    final m = jsonDecode(sc) as Map;
+    for (final k in ['b', 'l', 'd']) {
+      final v = m[k];
+      if (v is List && v.length == 2) {
+        kSchedule[k] = [(v[0] as num).toInt(), (v[1] as num).toInt()];
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------
+// ছোট সাহায্যকারী ফাংশন
+// ---------------------------------------------------------------
+String bnDigits(String s) {
+  const d = '০১২৩৪৫৬৭৮৯';
+  return s.replaceAllMapped(RegExp(r'\d'), (m) => d[int.parse(m.group(0)!)]);
+}
+
+String normSearch(String s) {
+  const bnD = '০১২৩৪৫৬৭৮৯';
+  var r = s.toLowerCase().trim();
+  for (int i = 0; i < 10; i++) {
+    r = r.replaceAll(bnD[i], '$i');
+  }
+  return r;
+}
+
+String dateLabel(DateTime d) =>
+    '${bnDigits('${d.day}')} ${kMonths[d.month - 1]} (${kWeekdays[d.weekday % 7]})';
+
+String shortDate(DateTime d) =>
+    '${bnDigits('${d.day}')} ${kMonths[d.month - 1]}';
+
+String isoOf(DateTime d) {
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  return '${d.year}-$m-$day';
+}
+
+DateTime todayDate() {
+  final n = DateTime.now();
+  return DateTime(n.year, n.month, n.day);
+}
+
+DateTime addDays(DateTime d, int n) => DateTime(d.year, d.month, d.day + n);
+
+Map<String, String> mapOf(dynamic raw) {
+  if (raw == null) return {};
+  return Map<String, String>.from(raw as Map);
+}
+
+double numOf(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
+
+String money(double v) =>
+    '${v < 0 ? '−' : ''}৳${bnDigits(v.abs().round().toString())}';
+
+int nowMinutes() {
+  final n = DateTime.now();
+  return n.hour * 60 + n.minute;
+}
+
+String fmtTime(int m) {
+  final h = m ~/ 60;
+  final mi = m % 60;
+  final h12 = h % 12 == 0 ? 12 : h % 12;
+  String p;
+  if (h < 4) {
+    p = 'রাত';
+  } else if (h < 12) {
+    p = 'সকাল';
+  } else if (h < 16) {
+    p = 'দুপুর';
+  } else if (h < 18) {
+    p = 'বিকাল';
+  } else {
+    p = 'রাত';
+  }
+  return '${bnDigits('$h12')}:${bnDigits(mi.toString().padLeft(2, '0'))} $p';
+}
+
+String fmtRange(String key) =>
+    '${fmtTime(kSchedule[key]![0])} – ${fmtTime(kSchedule[key]![1])}';
+
+String fmtNoticeTime(String iso) {
+  final dt = DateTime.parse(iso);
+  return '${shortDate(dt)}, ${fmtTime(dt.hour * 60 + dt.minute)}';
+}
+
+Future<String?> pickOption(
+    BuildContext context, String title, List<String> options) {
+  return showModalBottomSheet<String>(
+    context: context,
+    builder: (ctx) => SafeArea(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Text(title,
+                  style: const TextStyle(
+                      fontSize: 16, fontWeight: FontWeight.bold)),
+            ),
+            for (final o in options)
+              ListTile(
+                title: Text(o),
+                onTap: () => Navigator.pop(ctx, o),
+              ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------
+// শিক্ষার্থীর তথ্য লোড ও সেভ
+// ---------------------------------------------------------------
+double balOf(Map<String, dynamic> s) =>
+    numOf(s['op']) + numOf(s['pd']) - numOf(s['pc']);
+
+Future<List<Map<String, dynamic>>> loadStudents() async {
+  final prefs = await SharedPreferences.getInstance();
+  final data = prefs.getString('students');
+  if (data == null) return [];
+  final list = jsonDecode(data) as List;
+  // গতকালের মিল দিন রাখা হয়, কারণ আজ সকালের খাবার সেটারই অংশ
+  final keepFrom = isoOf(addDays(todayDate(), -1));
+  final loaded = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  for (final s in loaded) {
+    final meals = mapOf(s['meals']);
+    meals.removeWhere((k, v) => k.compareTo(keepFrom) < 0);
+    s['meals'] = meals;
+    s['eaten'] = mapOf(s['eaten']);
+    if (s['pd'] == null) {
+      // পুরোনো ডেটা নতুন হিসাব-কাঠামোতে আনা
+      final dep = numOf(s['deposit']);
+      final bal = numOf(s['balance']);
+      s['op'] = 0.0;
+      s['pd'] = dep;
+      s['pc'] = dep - bal;
+    }
+    s['slots'] = (s['slots'] as num?)?.toInt() ?? 0;
+    s['history'] = (s['history'] as List?)
+            ?.map((e) => Map<String, dynamic>.from(e as Map))
+            .toList() ??
+        <Map<String, dynamic>>[];
+  }
+  return loaded;
+}
+
+Future<void> saveStudents(List<Map<String, dynamic>> students) =>
+    putString('students', jsonEncode(students));
+
+int countEaten(Map<String, dynamic> s, String fromIso, String toIso) {
+  final eaten = mapOf(s['eaten']);
+  int n = 0;
+  eaten.forEach((k, v) {
+    if (k.compareTo(fromIso) >= 0 && k.compareTo(toIso) <= 0) n += v.length;
+  });
+  return n;
+}
+
+// ---------------------------------------------------------------
+// মিলের লাইন (কার্ডে দেখানোর জন্য)
+// ---------------------------------------------------------------
+String cycleNames(String v, String eaten) {
+  final parts = <String>[];
+  for (int j = 0; j < 3; j++) {
+    if (v.contains(kCycleKeys[j])) {
+      final name = j == 2 ? 'পরদিন সকাল' : kCycleNames[j];
+      parts.add(name + (eaten.contains(kCycleKeys[j]) ? ' ✓' : ''));
+    }
+  }
+  return parts.join(', ');
+}
+
+List<String> activeLines(Map<String, dynamic> s) {
+  final meals = mapOf(s['meals']);
+  final eaten = mapOf(s['eaten']);
+  final today = todayDate();
+  final todayIso = isoOf(today);
+  final yIso = isoOf(addDays(today, -1));
+  final keys = meals.keys.toList()..sort();
+  final lines = <String>[];
+  for (final k in keys) {
+    final v = meals[k] ?? '';
+    if (v.isEmpty) continue;
+    if (k.compareTo(todayIso) >= 0) {
+      lines.add('${dateLabel(DateTime.parse(k))}: ${cycleNames(v, eaten[k] ?? '')}');
+    } else if (k == yIso &&
+        v.contains('b') &&
+        nowMinutes() < kSchedule['l']![0]) {
+      final e = (eaten[k] ?? '').contains('b') ? ' ✓' : '';
+      lines.add('${dateLabel(today)}: সকাল$e');
+    }
+  }
+  return lines;
+}
+
+int activeDays(Map<String, dynamic> s) {
+  final meals = mapOf(s['meals']);
+  final todayIso = isoOf(todayDate());
+  int n = 0;
+  meals.forEach((k, v) {
+    if (v.isNotEmpty && k.compareTo(todayIso) >= 0) n++;
+  });
+  return n;
+}
+
+// ---------------------------------------------------------------
+// সবার জন্য ছোট উইজেট
+// ---------------------------------------------------------------
+Widget noticeBanner({VoidCallback? onTap}) {
+  final text = kNotices.isNotEmpty
+      ? (kNotices.last['text'] ?? '')
+      : 'কোনো নতুন নোটিশ নেই।';
+  return GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.amber.shade100,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.amber.shade700),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.notifications_active, color: Colors.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '📢 $text',
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                  color: Colors.black87, fontWeight: FontWeight.w500),
+            ),
+          ),
+          const Icon(Icons.chevron_right, color: Colors.black54),
+        ],
+      ),
+    ),
+  );
+}
+
+Widget accountRows(double op, double pd, double pc, double cl) {
+  Widget row(String a, String b, {Color? color, bool bold = false}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(a),
+            Text(b,
+                style: TextStyle(
+                    color: color,
+                    fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+          ],
+        ),
+      );
+  return Column(
+    children: [
+      row('শুরুর ব্যালেন্স', money(op)),
+      row('জমা', '+${money(pd)}'),
+      row('মিল খরচ', '−${money(pc)}'),
+      const Divider(height: 10),
+      row(
+        cl >= 0 ? 'পাওনা' : 'বকেয়া',
+        money(cl.abs()),
+        color: cl >= 0 ? Colors.green : Colors.red,
+        bold: true,
+      ),
+    ],
+  );
+}
+
+Widget priceCard() {
+  Widget row(String title, String price) => ListTile(
+        dense: true,
+        title: Text(title),
+        trailing: Text(price,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+      );
+  return Card(
+    child: Column(
+      children: [
+        row('শুধু সকাল', '৳ ১৫'),
+        const Divider(height: 1),
+        row('শুধু দুপুর', '৳ ৩৫'),
+        const Divider(height: 1),
+        row('শুধু রাত', '৳ ৩০'),
+        const Divider(height: 1),
+        row('দুপুর + রাত', '৳ ৬০'),
+        const Divider(height: 1),
+        row('সকাল + দুপুর', '৳ ৫০'),
+        const Divider(height: 1),
+        row('সকাল + রাত', '৳ ৪৫'),
+        const Divider(height: 1),
+        row('সকাল + দুপুর + রাত (পুরো দিন)', '৳ ৭০'),
+      ],
+    ),
+  );
+}
+
+Widget scheduleCard() {
+  Widget row(String key, String name) => ListTile(
+        dense: true,
+        leading: const Icon(Icons.access_time, color: Colors.teal),
+        title: Text(name),
+        trailing: Text(fmtRange(key),
+            style: const TextStyle(fontWeight: FontWeight.bold)),
+      );
+  return Card(
+    child: Column(
+      children: [
+        row('b', 'সকাল'),
+        const Divider(height: 1),
+        row('l', 'দুপুর'),
+        const Divider(height: 1),
+        row('d', 'রাত'),
+      ],
+    ),
+  );
+}
+
+// ---------------------------------------------------------------
+// শুরু
+// ---------------------------------------------------------------
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await loadAppData();
+  runApp(const OssimApp());
+}
+
+class OssimApp extends StatefulWidget {
+  const OssimApp({super.key});
+
+  @override
+  State<OssimApp> createState() => _OssimAppState();
+}
+
+class _OssimAppState extends State<OssimApp> {
+  void _toggleTheme(bool isDark) {
+    setState(() {
+      kDark = isDark;
+    });
+    saveDark();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Ossim',
+      themeMode: kDark ? ThemeMode.dark : ThemeMode.light,
+      theme: ThemeData(
+        brightness: Brightness.light,
+        colorSchemeSeed: Colors.teal,
+        scaffoldBackgroundColor: const Color(0xFFAFAFAF),
+        useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
+        brightness: Brightness.dark,
+        colorSchemeSeed: Colors.teal,
+        useMaterial3: true,
+      ),
+      home: LoginScreen(onThemeChanged: _toggleTheme),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// লগইন: শিক্ষার্থী / ম্যানেজার
+// ---------------------------------------------------------------
+class LoginScreen extends StatefulWidget {
+  final Function(bool) onThemeChanged;
+  const LoginScreen({super.key, required this.onThemeChanged});
+
+  @override
+  State<LoginScreen> createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  bool manager = false;
+  final TextEditingController idC = TextEditingController();
+  final TextEditingController pinC = TextEditingController();
+  String error = '';
+
+  @override
+  void dispose() {
+    idC.dispose();
+    pinC.dispose();
+    super.dispose();
+  }
+
+  Future<void> _studentLogin() async {
+    final q = normSearch(idC.text);
+    if (q.isEmpty) {
+      setState(() => error = 'নাম বা নম্বর লিখুন');
+      return;
+    }
+    final students = await loadStudents();
+    var found = students
+        .where((s) =>
+            s['id'].toString() == q || normSearch(s['name'].toString()) == q)
+        .toList();
+    if (found.isEmpty) {
+      found = students
+          .where((s) => normSearch(s['name'].toString()).contains(q))
+          .toList();
+    }
+    if (!mounted) return;
+    if (found.isEmpty) {
+      setState(() => error = 'কোনো শিক্ষার্থী পাওয়া যায়নি');
+      return;
+    }
+    if (found.length > 1) {
+      setState(() => error = 'একাধিক নাম মিলেছে, পুরো নাম বা নম্বর লিখুন');
+      return;
+    }
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StudentScreen(
+          studentId: found.first['id'] as int,
+          onThemeChanged: widget.onThemeChanged,
+        ),
+      ),
+    );
+  }
+
+  void _managerLogin() {
+    if (pinC.text.trim() != kManagerPin) {
+      setState(() => error = 'পিন ভুল হয়েছে');
+      return;
+    }
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => HomeScreen(onThemeChanged: widget.onThemeChanged),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.rice_bowl, size: 72, color: Colors.teal),
+              const SizedBox(height: 8),
+              const Text(
+                'Ossim-এ স্বাগতম',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 8,
+                children: [
+                  ChoiceChip(
+                    label: const Text('শিক্ষার্থী লগইন'),
+                    selected: !manager,
+                    onSelected: (_) => setState(() {
+                      manager = false;
+                      error = '';
+                    }),
+                  ),
+                  ChoiceChip(
+                    label: const Text('ম্যানেজার লগইন'),
+                    selected: manager,
+                    onSelected: (_) => setState(() {
+                      manager = true;
+                      error = '';
+                    }),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              if (!manager) ...[
+                TextField(
+                  controller: idC,
+                  decoration: const InputDecoration(
+                    labelText: 'আপনার নাম বা নম্বর',
+                    prefixIcon: Icon(Icons.person),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'নাম বা স্টুডেন্ট নম্বর, যেকোনোটা লিখলেই হবে।',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ] else ...[
+                TextField(
+                  controller: pinC,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'ম্যানেজার পিন',
+                    prefixIcon: Icon(Icons.lock),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'প্রথমবার ডিফল্ট পিন ১২৩৪। ঢুকে সেটিংস থেকে বদলে নিন।',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ],
+              if (error.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(error,
+                      style: const TextStyle(color: Colors.red, fontSize: 13)),
+                ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  onPressed: manager ? _managerLogin : _studentLogin,
+                  child: Text(
+                    manager ? 'ম্যানেজার হিসেবে ঢুকুন' : 'প্রবেশ করুন',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// শিক্ষার্থীর স্ক্রিন
+// ---------------------------------------------------------------
+class StudentScreen extends StatefulWidget {
+  final int studentId;
+  final Function(bool) onThemeChanged;
+  const StudentScreen({
+    super.key,
+    required this.studentId,
+    required this.onThemeChanged,
+  });
+
+  @override
+  State<StudentScreen> createState() => _StudentScreenState();
+}
+
+class _StudentScreenState extends State<StudentScreen> {
+  Map<String, dynamic>? me;
+  bool loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+  }
+
+  Future<void> _reload() async {
+    final list = await loadStudents();
+    Map<String, dynamic>? found;
+    for (final s in list) {
+      if (s['id'] == widget.studentId) found = s;
+    }
+    if (!mounted) return;
+    setState(() {
+      me = found;
+      loading = false;
+    });
+  }
+
+  void _logout() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(onThemeChanged: widget.onThemeChanged),
+      ),
+      (r) => false,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final s = me;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Ossim'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
+            onPressed: () => widget.onThemeChanged(!isDark),
+          ),
+          IconButton(
+            icon: const Icon(Icons.notifications),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const NoticesScreen(isManager: false),
+                ),
+              ).then((_) => setState(() {}));
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
+          ),
+        ],
+      ),
+      body: loading
+          ? const Center(child: CircularProgressIndicator())
+          : s == null
+              ? const Center(child: Text('আপনার তথ্য পাওয়া যায়নি।'))
+              : RefreshIndicator(
+                  onRefresh: _reload,
+                  child: ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: [
+                      noticeBanner(onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                const NoticesScreen(isManager: false),
+                          ),
+                        ).then((_) => setState(() {}));
+                      }),
+                      Card(
+                        margin: const EdgeInsets.only(top: 10),
+                        child: ListTile(
+                          leading: const Icon(Icons.admin_panel_settings,
+                              color: Colors.teal, size: 30),
+                          title: const Text('বর্তমান ম্যানেজার',
+                              style: TextStyle(fontSize: 12)),
+                          subtitle: Text(
+                            kManagerRoom.isEmpty
+                                ? 'এখনও নির্ধারণ করা হয়নি'
+                                : 'রুম $kManagerRoom এর ভাইয়েরা',
+                            style: const TextStyle(
+                                fontSize: 15, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 22,
+                                    backgroundColor: Colors.teal,
+                                    foregroundColor: Colors.white,
+                                    child: Text('${s['id']}'),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(s['name'],
+                                          style: const TextStyle(
+                                              fontSize: 18,
+                                              fontWeight: FontWeight.bold)),
+                                      Text(
+                                          'বর্ষ: ${s['year']} | রুম: ${s['room']}',
+                                          style:
+                                              const TextStyle(fontSize: 12)),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 10),
+                              Text(
+                                'চলমান হিসাব (${shortDate(DateTime.parse(kPeriodStart))} – ${shortDate(addDays(DateTime.parse(kPeriodStart), kPeriodDays - 1))})',
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 4),
+                              accountRows(numOf(s['op']), numOf(s['pd']),
+                                  numOf(s['pc']), balOf(s)),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: TextButton.icon(
+                                  onPressed: () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            HistoryScreen(student: s),
+                                      ),
+                                    );
+                                  },
+                                  icon: const Icon(Icons.history),
+                                  label: const Text(
+                                      'আগের সব হিসাব দেখুন (ইতিহাস)'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  const Icon(Icons.restaurant, size: 18),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    activeDays(s) > 0
+                                        ? 'আপনার মিল: ${activeDays(s)} দিন চালু'
+                                        : (activeLines(s).isNotEmpty
+                                            ? 'আপনার মিল চালু'
+                                            : 'আপনার মিল বন্ধ'),
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold),
+                                  ),
+                                ],
+                              ),
+                              for (final line in activeLines(s))
+                                Padding(
+                                  padding:
+                                      const EdgeInsets.only(left: 24, top: 3),
+                                  child: Text(line),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 12, bottom: 2),
+                        child: Text('⏰ খাবারের সময়-সূচি',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.teal)),
+                      ),
+                      scheduleCard(),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 12, bottom: 2),
+                        child: Text('🍽️ মূল্য তালিকা (প্রতি দিন)',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.teal)),
+                      ),
+                      priceCard(),
+                    ],
+                  ),
+                ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// হিসাবের ইতিহাস
+// ---------------------------------------------------------------
+class HistoryScreen extends StatelessWidget {
+  final Map<String, dynamic> student;
+  const HistoryScreen({super.key, required this.student});
+
+  @override
+  Widget build(BuildContext context) {
+    final hist = (student['history'] as List)
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList()
+        .reversed
+        .toList();
+    final start = DateTime.parse(kPeriodStart);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('হিসাবের ইতিহাস'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          Card(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+              side: const BorderSide(color: Colors.teal),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('চলমান হিসাব',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                          '${shortDate(start)} – ${shortDate(addDays(start, kPeriodDays - 1))}',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.teal)),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  accountRows(numOf(student['op']), numOf(student['pd']),
+                      numOf(student['pc']), balOf(student)),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+            child: Text('আগের হিসাব (${bnDigits('${hist.length}')}টি)',
+                style: const TextStyle(fontSize: 13)),
+          ),
+          if (hist.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(24),
+              child: Center(child: Text('এখনও কোনো আগের হিসাব নেই।')),
+            ),
+          for (final h in hist)
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${shortDate(DateTime.parse(h['from'] as String))} – ${shortDate(DateTime.parse(h['to'] as String))}',
+                          style:
+                              const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          'বেলা ${bnDigits('${h['slots'] ?? 0}')} | খেয়েছে ${bnDigits('${h['ate'] ?? 0}')}',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    accountRows(numOf(h['op']), numOf(h['pd']),
+                        numOf(h['pc']), numOf(h['cl'])),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// নোটিফিকেশন
+// ---------------------------------------------------------------
+class NoticesScreen extends StatefulWidget {
+  final bool isManager;
+  const NoticesScreen({super.key, required this.isManager});
+
+  @override
+  State<NoticesScreen> createState() => _NoticesScreenState();
+}
+
+class _NoticesScreenState extends State<NoticesScreen> {
+  void _compose() {
+    final c = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('নতুন নোটিফিকেশন'),
+        content: TextField(
+          controller: c,
+          maxLines: 4,
+          decoration: const InputDecoration(
+            hintText: 'সবার জন্য নোটিফিকেশনের লেখা...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final t = c.text.trim();
+              if (t.isEmpty) return;
+              setState(() {
+                kNotices.add({
+                  'text': t,
+                  'at': DateTime.now().toIso8601String(),
+                });
+              });
+              saveNotices();
+              Navigator.pop(ctx);
+            },
+            child: const Text('পাঠান'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = kNotices.asMap().entries.toList().reversed.toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('নোটিফিকেশন'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+      ),
+      floatingActionButton: widget.isManager
+          ? FloatingActionButton.extended(
+              onPressed: _compose,
+              backgroundColor: Colors.teal,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.send),
+              label: const Text('নতুন নোটিফিকেশন'),
+            )
+          : null,
+      body: items.isEmpty
+          ? const Center(child: Text('কোনো নোটিফিকেশন নেই।'))
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+              children: [
+                if (widget.isManager)
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'নোটিফিকেশন এই ফোনের অ্যাপে সেভ হয়। অন্য ফোনে পৌঁছাতে অনলাইন সার্ভার লাগবে।',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ),
+                for (final e in items)
+                  Card(
+                    child: ListTile(
+                      title: Text(e.value['text'] ?? ''),
+                      subtitle: Text(fmtNoticeTime(e.value['at']!),
+                          style: const TextStyle(fontSize: 11)),
+                      trailing: widget.isManager
+                          ? IconButton(
+                              icon: const Icon(Icons.delete, color: Colors.red),
+                              onPressed: () {
+                                setState(() => kNotices.removeAt(e.key));
+                                saveNotices();
+                              },
+                            )
+                          : null,
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// ম্যানেজারের হোম
+// ---------------------------------------------------------------
+class HomeScreen extends StatefulWidget {
+  final Function(bool) onThemeChanged;
+  const HomeScreen({super.key, required this.onThemeChanged});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  String searchQuery = '';
+  List<Map<String, dynamic>> students = [];
+
+  static const int maxMealDays = 4;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final loaded = await loadStudents();
+    if (!mounted) return;
+    setState(() {
+      students = loaded;
+    });
+  }
+
+  Future<void> _save() => saveStudents(students);
+
+  int _price(bool b, bool l, bool d) {
+    if (b && l && d) return 70;
+    if (b && l) return 50;
+    if (b && d) return 45;
+    if (l && d) return 60;
+    if (b) return 15;
+    if (l) return 35;
+    if (d) return 30;
+    return 0;
+  }
+
+  // f = [দুপুর, রাত, সকাল]
+  int _priceOf(List<bool> f) => _price(f[2], f[0], f[1]);
+
+  List<bool> _flagsOf(String? v) {
+    final s = v ?? '';
+    return [s.contains('l'), s.contains('d'), s.contains('b')];
+  }
+
+  String _flagsToStr(List<bool> f) {
+    var r = '';
+    if (f[0]) r += 'l';
+    if (f[1]) r += 'd';
+    if (f[2]) r += 'b';
+    return r;
+  }
+
+  void _logout() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(onThemeChanged: widget.onThemeChanged),
+      ),
+      (r) => false,
+    );
+  }
+
+  // ---- নতুন ৪ দিনের হিসাব ----
+  void _confirmNewPeriod() {
+    final start = DateTime.parse(kPeriodStart);
+    final end = addDays(start, kPeriodDays - 1);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('নতুন ৪ দিনের হিসাব শুরু করবেন?'),
+        content: Text(
+          'চলমান হিসাব (${shortDate(start)} – ${shortDate(end)}) সবার ইতিহাসে জমা হবে। প্রত্যেকের বর্তমান পাওনা বা বকেয়া নতুন হিসাবের শুরুর ব্যালেন্স হিসেবে যাবে। মিল চালু থাকা বেলাগুলো আগের মতোই থাকবে।',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              _startNewPeriod();
+              Navigator.pop(ctx);
+            },
+            child: const Text('হ্যাঁ, শুরু করুন'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _startNewPeriod() {
+    final today = todayDate();
+    final fromIso = kPeriodStart;
+    final toIso = isoOf(today);
+    setState(() {
+      for (final s in students) {
+        final cl = balOf(s);
+        final hist = (s['history'] as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList();
+        hist.add({
+          'from': fromIso,
+          'to': toIso,
+          'op': numOf(s['op']),
+          'pd': numOf(s['pd']),
+          'pc': numOf(s['pc']),
+          'cl': cl,
+          'slots': s['slots'] ?? 0,
+          'ate': countEaten(s, fromIso, toIso),
+        });
+        s['history'] = hist;
+        s['op'] = cl;
+        s['pd'] = 0.0;
+        s['pc'] = 0.0;
+        s['slots'] = 0;
+      }
+      kPeriodStart = toIso;
+    });
+    savePeriodStart();
+    _save();
+  }
+
+  Widget _periodCard() {
+    final start = DateTime.parse(kPeriodStart);
+    final end = addDays(start, kPeriodDays - 1);
+    final today = todayDate();
+    final over = today.isAfter(end);
+    int dn = today.difference(start).inDays + 1;
+    if (dn < 1) dn = 1;
+    if (dn > kPeriodDays) dn = kPeriodDays;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+            color: over ? Colors.orange.shade800 : Colors.transparent),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('চলমান ৪ দিনের হিসাব',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      Text(
+                        '${shortDate(start)} – ${shortDate(end)} | ${over ? '৪ দিন পূর্ণ' : 'দিন ${bnDigits('$dn')}/৪'}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.orange.shade800,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: _confirmNewPeriod,
+                  child: const Text('নতুন হিসাব শুরু'),
+                ),
+              ],
+            ),
+            if (over)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '৪ দিন পূর্ণ হয়েছে। নতুন হিসাব শুরু করুন।',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.orange.shade900),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---- স্টুডেন্ট যোগ ----
+  void _showAddStudentDialog() {
+    final nameC = TextEditingController();
+    final yearC = TextEditingController();
+    final roomC = TextEditingController();
+    final depositC = TextEditingController();
+    bool tried = false;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('নতুন স্টুডেন্ট যোগ করুন'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameC,
+                  decoration: const InputDecoration(labelText: 'নাম'),
+                ),
+                // বর্ষ: ট্যাপ করলে অপশনের তালিকা আসবে
+                TextField(
+                  controller: yearC,
+                  readOnly: true,
+                  decoration: InputDecoration(
+                    labelText: 'বর্ষ',
+                    suffixIcon: const Icon(Icons.arrow_drop_down),
+                    errorText: (tried && yearC.text.isEmpty)
+                        ? 'বর্ষ বেছে নিন'
+                        : null,
+                  ),
+                  onTap: () async {
+                    final v = await pickOption(ctx, 'বর্ষ বেছে নিন', kYears);
+                    if (v != null) {
+                      setDialogState(() => yearC.text = v);
+                    }
+                  },
+                ),
+                TextField(
+                  controller: roomC,
+                  decoration: const InputDecoration(labelText: 'রুম নম্বর'),
+                ),
+                TextField(
+                  controller: depositC,
+                  keyboardType: TextInputType.number,
+                  decoration:
+                      const InputDecoration(labelText: 'শুরুর জমা (৳)'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('বাতিল'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final name = nameC.text.trim();
+                if (name.isEmpty) return;
+                if (yearC.text.isEmpty) {
+                  setDialogState(() => tried = true);
+                  return;
+                }
+                final deposit = double.tryParse(depositC.text.trim()) ?? 0.0;
+                int nextId = 1;
+                for (final s in students) {
+                  final id = s['id'] as int;
+                  if (id >= nextId) nextId = id + 1;
+                }
+                setState(() {
+                  students.add({
+                    'id': nextId,
+                    'name': name,
+                    'year': yearC.text,
+                    'room': roomC.text.trim(),
+                    'op': 0.0,
+                    'pd': deposit,
+                    'pc': 0.0,
+                    'slots': 0,
+                    'meals': <String, String>{},
+                    'eaten': <String, String>{},
+                    'history': <Map<String, dynamic>>[],
+                  });
+                });
+                _save();
+                Navigator.pop(ctx);
+              },
+              child: const Text('যোগ করুন'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDepositDialog(Map<String, dynamic> student) {
+    final amountC = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${student['name']} - টাকা জমা'),
+        content: TextField(
+          controller: amountC,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(labelText: 'পরিমাণ (৳)'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final amount = double.tryParse(amountC.text.trim()) ?? 0.0;
+              if (amount <= 0) return;
+              setState(() {
+                student['pd'] = numOf(student['pd']) + amount;
+              });
+              _save();
+              Navigator.pop(ctx);
+            },
+            child: const Text('জমা দিন'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMealDialog(Map<String, dynamic> student) {
+    final meals = mapOf(student['meals']);
+    final today = todayDate();
+    final dates = List.generate(maxMealDays, (i) => addDays(today, i));
+    final locked = dates.map((d) => _flagsOf(meals[isoOf(d)])).toList();
+    final sel = locked.map((f) => List<bool>.from(f)).toList();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          int total = 0;
+          int newSlots = 0;
+          for (int i = 0; i < maxMealDays; i++) {
+            total += _priceOf(sel[i]) - _priceOf(locked[i]);
+            for (int j = 0; j < 3; j++) {
+              if (sel[i][j] && !locked[i][j]) newSlots++;
+            }
+          }
+
+          return AlertDialog(
+            title: Text('${student['name']} - মিল চালু করুন'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'মিলের একদিন শুরু হয় দুপুরে। পুরো একদিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল। ধূসর বেলা আগে থেকেই চালু।',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 8),
+                  for (int i = 0; i < maxMealDays; i++)
+                    Container(
+                      margin: const EdgeInsets.symmetric(vertical: 4),
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey.shade400),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(
+                                child: Text(dateLabel(dates[i]),
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold)),
+                              ),
+                              GestureDetector(
+                                onTap: () => setDialogState(() {
+                                  for (int j = 0; j < 3; j++) {
+                                    sel[i][j] = true;
+                                  }
+                                }),
+                                child: const Text(
+                                  'পুরো দিন',
+                                  style: TextStyle(
+                                      color: Colors.teal, fontSize: 13),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Wrap(
+                            spacing: 6,
+                            children: [
+                              for (int j = 0; j < 3; j++)
+                                FilterChip(
+                                  label: Text(j == 2
+                                      ? 'সকাল (${shortDate(addDays(dates[i], 1))})'
+                                      : kCycleNames[j]),
+                                  selected: sel[i][j],
+                                  onSelected: locked[i][j]
+                                      ? null
+                                      : (v) => setDialogState(
+                                          () => sel[i][j] = v),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'নতুন যোগ: ৳ $total',
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('বাতিল'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (newSlots == 0) return;
+                  final updated = Map<String, String>.from(meals);
+                  for (int i = 0; i < maxMealDays; i++) {
+                    final str = _flagsToStr(sel[i]);
+                    final key = isoOf(dates[i]);
+                    if (str.isEmpty) {
+                      updated.remove(key);
+                    } else {
+                      updated[key] = str;
+                    }
+                  }
+                  setState(() {
+                    student['pc'] = numOf(student['pc']) + total;
+                    student['slots'] =
+                        ((student['slots'] as num?)?.toInt() ?? 0) + newSlots;
+                    student['meals'] = updated;
+                  });
+                  _save();
+                  Navigator.pop(ctx);
+                },
+                child: const Text('চালু করুন'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _confirmDelete(Map<String, dynamic> student) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('ডিলিট করবেন?'),
+        content: Text('${student['name']} কে তালিকা থেকে মুছে ফেলা হবে।'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('না'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              setState(() => students.remove(student));
+              _save();
+              Navigator.pop(ctx);
+            },
+            child: const Text('হ্যাঁ, ডিলিট'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final q = normSearch(searchQuery);
+    final filtered = students.where((s) {
+      if (q.isEmpty) return true;
+      return normSearch(s['name'].toString()).contains(q) ||
+          normSearch(s['id'].toString()).contains(q) ||
+          normSearch(s['room'].toString()).contains(q);
+    }).toList();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Ossim (ম্যানেজার)'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
+            onPressed: () => widget.onThemeChanged(!isDark),
+          ),
+          IconButton(
+            icon: const Icon(Icons.notifications),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const NoticesScreen(isManager: true),
+                ),
+              ).then((_) => setState(() {}));
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SettingsScreen(),
+                ),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _showAddStudentDialog,
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.person_add),
+        label: const Text('স্টুডেন্ট যোগ'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          children: [
+            noticeBanner(onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const NoticesScreen(isManager: true),
+                ),
+              ).then((_) => setState(() {}));
+            }),
+            const SizedBox(height: 10),
+            _periodCard(),
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.teal,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => AttendanceScreen(
+                            students: students,
+                            onChanged: () {
+                              setState(() {});
+                              _save();
+                            },
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.fact_check),
+                    label: const Text('খাবার চিহ্নিত করুন'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange.shade800,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              const NoticesScreen(isManager: true),
+                        ),
+                      ).then((_) => setState(() {}));
+                    },
+                    icon: const Icon(Icons.send),
+                    label: const Text('নোটিফিকেশন'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              onChanged: (v) => setState(() => searchQuery = v),
+              decoration: InputDecoration(
+                hintText: 'স্টুডেন্ট নম্বর বা নাম দিয়ে খুঁজুন...',
+                prefixIcon: const Icon(Icons.search),
+                border:
+                    OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        students.isEmpty
+                            ? 'কোনো স্টুডেন্ট নেই।\nনিচের "স্টুডেন্ট যোগ" বাটন চাপুন।'
+                            : 'কাউকে খুঁজে পাওয়া যায়নি।',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.only(bottom: 80),
+                      itemCount: filtered.length,
+                      itemBuilder: (context, index) {
+                        final student = filtered[index];
+                        final double balance = balOf(student);
+                        final lines = activeLines(student);
+                        final days = activeDays(student);
+
+                        return Card(
+                          margin: const EdgeInsets.symmetric(vertical: 8),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12.0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    CircleAvatar(
+                                      backgroundColor: Colors.teal,
+                                      foregroundColor: Colors.white,
+                                      child: Text('${student['id']}'),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            student['name'],
+                                            style: const TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold),
+                                          ),
+                                          Text(
+                                              'বর্ষ: ${student['year']} | রুম: ${student['room']}'),
+                                        ],
+                                      ),
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete,
+                                          color: Colors.red),
+                                      onPressed: () => _confirmDelete(student),
+                                    ),
+                                  ],
+                                ),
+                                const Divider(),
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text('জমা: ${money(numOf(student['pd']))}'),
+                                    Text(
+                                      balance >= 0
+                                          ? 'পাওনা: ${money(balance)}'
+                                          : 'বকেয়া: ${money(balance.abs())}',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: balance >= 0
+                                            ? Colors.green
+                                            : Colors.red,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 6),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      Icons.restaurant,
+                                      size: 16,
+                                      color: lines.isNotEmpty
+                                          ? Colors.green
+                                          : Colors.grey,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      days > 0
+                                          ? 'মিল চালু: $days দিন'
+                                          : (lines.isNotEmpty
+                                              ? 'মিল চালু'
+                                              : 'মিল বন্ধ'),
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        color: lines.isNotEmpty
+                                            ? Colors.green
+                                            : Colors.grey,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                for (final line in lines)
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                        left: 22, top: 2),
+                                    child: Text(line,
+                                        style: const TextStyle(fontSize: 12)),
+                                  ),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor:
+                                              Colors.teal.shade700,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        onPressed: () =>
+                                            _showDepositDialog(student),
+                                        icon: const Icon(Icons.payment),
+                                        label: const Text('জমা দিন'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor:
+                                              Colors.orange.shade800,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                        onPressed: () =>
+                                            _showMealDialog(student),
+                                        icon: const Icon(Icons.restaurant),
+                                        label: const Text('মিল যোগ'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// খাবার চিহ্নিত করা (ম্যানেজার)
+// ---------------------------------------------------------------
+class AttendanceScreen extends StatefulWidget {
+  final List<Map<String, dynamic>> students;
+  final VoidCallback onChanged;
+  const AttendanceScreen({
+    super.key,
+    required this.students,
+    required this.onChanged,
+  });
+
+  @override
+  State<AttendanceScreen> createState() => _AttendanceScreenState();
+}
+
+class _AttendanceScreenState extends State<AttendanceScreen> {
+  late final DateTime today;
+  late DateTime cycle;
+  int slot = 0; // 0 = দুপুর, 1 = রাত, 2 = পরদিন সকাল
+
+  @override
+  void initState() {
+    super.initState();
+    today = todayDate();
+    final n = nowMinutes();
+    // সময়-সূচি অনুযায়ী এখন কোন বেলা চলছে তা নিজে থেকে বেছে নেওয়া হয়
+    if (n < kSchedule['l']![0]) {
+      cycle = addDays(today, -1);
+      slot = 2;
+    } else if (n < kSchedule['d']![0]) {
+      cycle = today;
+      slot = 0;
+    } else {
+      cycle = today;
+      slot = 1;
+    }
+  }
+
+  String get _key => isoOf(cycle);
+  String get _ch => kCycleKeys[slot];
+
+  bool _hasMeal(Map<String, dynamic> s) {
+    final v = mapOf(s['meals'])[_key] ?? '';
+    return v.contains(_ch);
+  }
+
+  bool _ate(Map<String, dynamic> s) {
+    final v = mapOf(s['eaten'])[_key] ?? '';
+    return v.contains(_ch);
+  }
+
+  void _setAte(Map<String, dynamic> s, bool value) {
+    final e = mapOf(s['eaten']);
+    var cur = e[_key] ?? '';
+    if (value) {
+      if (!cur.contains(_ch)) cur += _ch;
+    } else {
+      cur = cur.replaceAll(_ch, '');
+    }
+    if (cur.isEmpty) {
+      e.remove(_key);
+    } else {
+      e[_key] = cur;
+    }
+    s['eaten'] = e;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final on = widget.students.where(_hasMeal).toList();
+    final off = widget.students.where((s) => !_hasMeal(s)).toList();
+    final ateCount = on.where(_ate).length;
+    final remaining = on.length - ateCount;
+    final canPrev = cycle.isAfter(addDays(today, -1));
+    final canNext = cycle.isBefore(addDays(today, 3));
+    final mealDate = slot == 2 ? addDays(cycle, 1) : cycle;
+    final timeKey = ['l', 'd', 'b'][slot];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('খাবার চিহ্নিত করুন'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 14),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  'খেয়েছে: ${bnDigits('$ateCount')}',
+                  style: const TextStyle(fontSize: 12, color: Colors.white),
+                ),
+                Text(
+                  'বাকি: ${bnDigits('$remaining')}',
+                  style: TextStyle(fontSize: 12, color: Colors.amber.shade200),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.chevron_left),
+                  onPressed: canPrev
+                      ? () => setState(() => cycle = addDays(cycle, -1))
+                      : null,
+                ),
+                Expanded(
+                  child: Column(
+                    children: [
+                      Text(
+                        'মিল দিন: ${dateLabel(cycle)}',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      const Text(
+                        'দুপুর থেকে পরদিন সকাল পর্যন্ত',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.chevron_right),
+                  onPressed: canNext
+                      ? () => setState(() => cycle = addDays(cycle, 1))
+                      : null,
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (int i = 0; i < 3; i++)
+                  ChoiceChip(
+                    label: Text(i == 2
+                        ? 'পরদিন সকাল (${shortDate(addDays(cycle, 1))})'
+                        : kCycleNames[i]),
+                    selected: slot == i,
+                    onSelected: (_) => setState(() => slot = i),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'খাবারের তারিখ: ${dateLabel(mealDate)}\nসময়: ${fmtRange(timeKey)}',
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (on.isNotEmpty)
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () {
+                    setState(() {
+                      for (final s in on) {
+                        _setAte(s, true);
+                      }
+                    });
+                    widget.onChanged();
+                  },
+                  child: const Text('সবাইকে চিহ্নিত করুন'),
+                ),
+              ),
+            Expanded(
+              child: on.isEmpty
+                  ? const Center(
+                      child: Text('এই বেলায় কারও মিল চালু নেই।'),
+                    )
+                  : ListView(
+                      children: [
+                        for (final s in on)
+                          Card(
+                            child: CheckboxListTile(
+                              value: _ate(s),
+                              onChanged: (v) {
+                                setState(() => _setAte(s, v ?? false));
+                                widget.onChanged();
+                              },
+                              title: Text(
+                                s['name'],
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.bold),
+                              ),
+                              subtitle: Text('রুম: ${s['room']}'),
+                              secondary: CircleAvatar(
+                                backgroundColor: Colors.teal,
+                                foregroundColor: Colors.white,
+                                child: Text('${s['id']}'),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+            ),
+            if (off.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'এই বেলায় মিল বন্ধ: ${off.map((s) => s['name']).join(', ')}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// সেটিংস (শুধু ম্যানেজার)
+// ---------------------------------------------------------------
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  List<Map<String, dynamic>> students = [];
+
+  @override
+  void initState() {
+    super.initState();
+    loadStudents().then((l) {
+      if (!mounted) return;
+      setState(() => students = l);
+    });
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  // ---- ম্যানেজারের রুম ----
+  void _pickRoom() {
+    final rooms = <String>{};
+    for (final s in students) {
+      final r = s['room'].toString();
+      if (r.isNotEmpty) rooms.add(r);
+    }
+    final c = TextEditingController();
+    String selected = kManagerRoom;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('ম্যানেজার কত নম্বর রুমে থাকেন?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final r in rooms)
+                      ChoiceChip(
+                        label: Text('রুম $r'),
+                        selected: selected == r,
+                        onSelected: (_) => setD(() {
+                          selected = r;
+                          c.clear();
+                        }),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Text('তালিকায় না থাকলে নম্বর লিখুন',
+                    style: TextStyle(fontSize: 12)),
+                TextField(
+                  controller: c,
+                  decoration: const InputDecoration(labelText: 'রুম নম্বর'),
+                  onChanged: (_) => setD(() => selected = ''),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('বাতিল'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final room = c.text.trim().isNotEmpty ? c.text.trim() : selected;
+                if (room.isEmpty) return;
+                setState(() => kManagerRoom = room);
+                saveRoom();
+                Navigator.pop(ctx);
+              },
+              child: const Text('সেভ করুন'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ---- সময়-সূচি (শুরু ও শেষ) ----
+  Future<void> _editSchedule(String key, String name) async {
+    final cur = kSchedule[key]!;
+    final start = await showTimePicker(
+      context: context,
+      helpText: '$name - শুরুর সময়',
+      initialTime: TimeOfDay(hour: cur[0] ~/ 60, minute: cur[0] % 60),
+    );
+    if (start == null || !mounted) return;
+    final end = await showTimePicker(
+      context: context,
+      helpText: '$name - শেষের সময়',
+      initialTime: TimeOfDay(hour: cur[1] ~/ 60, minute: cur[1] % 60),
+    );
+    if (end == null || !mounted) return;
+    final s = start.hour * 60 + start.minute;
+    final e = end.hour * 60 + end.minute;
+    if (e <= s) {
+      _snack('শেষের সময় শুরুর পরে হতে হবে');
+      return;
+    }
+    setState(() => kSchedule[key] = [s, e]);
+    await saveSchedule();
+  }
+
+  Future<void> _resetSchedule() async {
+    setState(() => kSchedule = copyDefaultSchedule());
+    await saveSchedule();
+  }
+
+  Widget _scheduleRow(String key, String name) {
+    return ListTile(
+      leading: const Icon(Icons.access_time, color: Colors.teal),
+      title: Text(name),
+      subtitle: Text(fmtRange(key)),
+      trailing: const Icon(Icons.edit, size: 18),
+      onTap: () => _editSchedule(key, name),
+    );
+  }
+
+  // ---- পিন পরিবর্তন ----
+  void _changePin() {
+    final curC = TextEditingController();
+    final newC = TextEditingController();
+    final confC = TextEditingController();
+    String err = '';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('ম্যানেজার পিন পরিবর্তন'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: curC,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'বর্তমান পিন'),
+                ),
+                TextField(
+                  controller: newC,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                      labelText: 'নতুন পিন (কমপক্ষে ৪ অক্ষর)'),
+                ),
+                TextField(
+                  controller: confC,
+                  obscureText: true,
+                  decoration:
+                      const InputDecoration(labelText: 'নতুন পিন আবার লিখুন'),
+                ),
+                if (err.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(err,
+                        style:
+                            const TextStyle(color: Colors.red, fontSize: 12)),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('বাতিল'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (curC.text.trim() != kManagerPin) {
+                  setD(() => err = 'বর্তমান পিন ভুল');
+                  return;
+                }
+                final np = newC.text.trim();
+                if (np.length < 4) {
+                  setD(() => err = 'নতুন পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
+                  return;
+                }
+                if (np != confC.text.trim()) {
+                  setD(() => err = 'নতুন পিন মিলছে না');
+                  return;
+                }
+                kManagerPin = np;
+                await savePin();
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx);
+                if (mounted) _snack('পিন বদলানো হয়েছে');
+              },
+              child: const Text('বদলান'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const heading = TextStyle(
+        fontSize: 20, fontWeight: FontWeight.bold, color: Colors.teal);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('সেটিংস (ম্যানেজার)'),
+        backgroundColor: Colors.teal,
+        foregroundColor: Colors.white,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16.0),
+        children: [
+          const Text('🏠 ম্যানেজারের রুম', style: heading),
+          const SizedBox(height: 6),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.admin_panel_settings,
+                  color: Colors.teal),
+              title: Text(kManagerRoom.isEmpty
+                  ? 'রুম বেছে নিন'
+                  : 'রুম $kManagerRoom'),
+              trailing: const Icon(Icons.arrow_drop_down),
+              onTap: _pickRoom,
+            ),
+          ),
+          const Text(
+            'শিক্ষার্থীরা দেখতে পাবে এখন কোন রুমের ভাইয়েরা ম্যানেজারির দায়িত্বে আছেন।',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 22),
+          const Text('⏰ খাবারের সময়-সূচি', style: heading),
+          const SizedBox(height: 4),
+          const Text(
+            'প্রতিটা বেলার শুরু ও শেষের সময়। বদলাতে সারিতে ট্যাপ করুন।',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          Card(
+            child: Column(
+              children: [
+                _scheduleRow('b', 'সকাল'),
+                const Divider(height: 1),
+                _scheduleRow('l', 'দুপুর'),
+                const Divider(height: 1),
+                _scheduleRow('d', 'রাত'),
+              ],
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: _resetSchedule,
+              child: const Text('ডিফল্টে ফিরুন'),
+            ),
+          ),
+          const SizedBox(height: 14),
+          const Text('🍽️ খাবারের মূল্য তালিকা (প্রতি দিন)', style: heading),
+          const SizedBox(height: 6),
+          priceCard(),
+          const SizedBox(height: 8),
+          const Text(
+            'মিলের একদিন শুরু হয় দুপুরে। পুরো দিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল। আজ থেকে পরের ৪ দিনের যেকোনো বেলা চালু করা যাবে।',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 22),
+          const Text('🔒 ম্যানেজার পিন', style: heading),
+          const SizedBox(height: 4),
+          const Text(
+            'ম্যানেজার বদলালে নতুন পিন বসিয়ে নতুন ম্যানেজারকে দিন।',
+            style: TextStyle(fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          Card(
+            child: ListTile(
+              leading: const Icon(Icons.lock, color: Colors.teal),
+              title: const Text('পিন পরিবর্তন করুন'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _changePin,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
