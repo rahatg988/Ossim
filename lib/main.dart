@@ -3,6 +3,8 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'extras.dart';
+
 // ---------------------------------------------------------------
 // Firebase সেটিং (google-services.json থেকে)
 // ---------------------------------------------------------------
@@ -562,6 +564,8 @@ Future<void> main() async {
   final prefs = await SharedPreferences.getInstance();
   data.dark = prefs.getBool('dark') ?? false;
   data.start();
+  await extra.init();
+  extra.start();
   runApp(const OssimApp());
 }
 
@@ -574,6 +578,7 @@ class OssimApp extends StatelessWidget {
       listenable: data,
       builder: (context, _) => MaterialApp(
         debugShowCheckedModeBanner: false,
+        scaffoldMessengerKey: messengerKey,
         title: 'Ossim',
         themeMode: data.dark ? ThemeMode.dark : ThemeMode.light,
         theme: ThemeData(
@@ -587,7 +592,7 @@ class OssimApp extends StatelessWidget {
           colorSchemeSeed: Colors.teal,
           useMaterial3: true,
         ),
-        home: const LoginScreen(),
+        home: const LoginScreen2(),
       ),
     );
   }
@@ -794,7 +799,7 @@ class _LoginScreenState extends State<LoginScreen> {
 void goLogin(BuildContext context) {
   Navigator.pushAndRemoveUntil(
     context,
-    MaterialPageRoute(builder: (_) => const LoginScreen()),
+    MaterialPageRoute(builder: (_) => const LoginScreen2()),
     (r) => false,
   );
 }
@@ -875,6 +880,7 @@ class StudentScreen extends StatelessWidget {
                         ),
                       ),
                     ),
+                    studentMealCard(context, s),
                     Card(
                       child: Padding(
                         padding: const EdgeInsets.all(12),
@@ -1681,6 +1687,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             noticeBanner(onTap: _openNotices),
             const SizedBox(height: 10),
+            mealPermCard(),
             _periodCard(),
             Row(
               children: [
@@ -1695,7 +1702,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const AttendanceScreen(),
+                          builder: (_) => const AttendanceScreen2(),
                         ),
                       );
                     },
