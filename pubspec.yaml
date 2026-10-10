@@ -1,17 +1,13 @@
 name: ossim
-description: Ossim app
-publish_to: 'none'
+description: Ossim meal manager
 version: 1.0.0+1
-
 environment:
   sdk: '>=3.0.0 <4.0.0'
-
 dependencies:
   flutter:
     sdk: flutter
   shared_preferences: ^2.2.0
-  firebase_core: ^3.6.0
-  cloud_firestore: ^5.4.0
-
+  firebase_core: any
+  cloud_firestore: any
 flutter:
   uses-material-design: true
