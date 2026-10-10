@@ -1,6 +1,18 @@
-import 'dart:convert';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+// ---------------------------------------------------------------
+// Firebase সেটিং (google-services.json থেকে)
+// ---------------------------------------------------------------
+const FirebaseOptions kFirebaseOptions = FirebaseOptions(
+  apiKey: 'AIzaSyCfRwGDYv0GAPCfbSa2pA00NKNBNYCl2MY',
+  appId: '1:107405549494:android:b811e39e1ebd494e35eb17',
+  messagingSenderId: '107405549494',
+  projectId: 'ossim-5e0c2',
+  storageBucket: 'ossim-5e0c2.firebasestorage.app',
+);
 
 // ---------------------------------------------------------------
 // ধ্রুবক
@@ -45,7 +57,7 @@ const List<String> kYears = [
 const int kPeriodDays = 4;
 
 // খাবারের সময়-সূচি: [শুরু, শেষ] মিনিটে (রাত ১২টা থেকে)
-// শেষের সময়গুলো আনুমানিক দেওয়া আছে, ম্যানেজার সেটিংস থেকে বদলাবেন
+// শেষের সময়গুলো আনুমানিক, ম্যানেজার সেটিংস থেকে বদলাবেন
 const Map<String, List<int>> kDefaultSchedule = {
   'b': [8 * 60 + 40, 9 * 60 + 40],
   'l': [13 * 60 + 45, 14 * 60 + 45],
@@ -56,64 +68,6 @@ Map<String, List<int>> copyDefaultSchedule() => {
       for (final e in kDefaultSchedule.entries)
         e.key: List<int>.from(e.value),
     };
-
-// ---------------------------------------------------------------
-// অ্যাপের সাধারণ তথ্য (ফোনে সেভ থাকে)
-// ---------------------------------------------------------------
-Map<String, List<int>> kSchedule = copyDefaultSchedule();
-String kManagerPin = '1234';
-String kManagerRoom = '';
-String kPeriodStart = '';
-bool kDark = false;
-List<Map<String, String>> kNotices = [];
-
-Future<void> putString(String key, String value) async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setString(key, value);
-}
-
-Future<void> saveSchedule() => putString('schedule', jsonEncode(kSchedule));
-Future<void> savePin() => putString('managerPin', kManagerPin);
-Future<void> saveRoom() => putString('managerRoom', kManagerRoom);
-Future<void> savePeriodStart() => putString('periodStart', kPeriodStart);
-Future<void> saveNotices() => putString('notices', jsonEncode(kNotices));
-Future<void> saveDark() async {
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setBool('dark', kDark);
-}
-
-Future<void> loadAppData() async {
-  final prefs = await SharedPreferences.getInstance();
-  kManagerPin = prefs.getString('managerPin') ?? '1234';
-  kManagerRoom = prefs.getString('managerRoom') ?? '';
-  kDark = prefs.getBool('dark') ?? false;
-
-  final ps = prefs.getString('periodStart');
-  if (ps == null) {
-    kPeriodStart = isoOf(todayDate());
-    await savePeriodStart();
-  } else {
-    kPeriodStart = ps;
-  }
-
-  final n = prefs.getString('notices');
-  if (n != null) {
-    kNotices = (jsonDecode(n) as List)
-        .map((e) => Map<String, String>.from(e as Map))
-        .toList();
-  }
-
-  final sc = prefs.getString('schedule');
-  if (sc != null) {
-    final m = jsonDecode(sc) as Map;
-    for (final k in ['b', 'l', 'd']) {
-      final v = m[k];
-      if (v is List && v.length == 2) {
-        kSchedule[k] = [(v[0] as num).toInt(), (v[1] as num).toInt()];
-      }
-    }
-  }
-}
 
 // ---------------------------------------------------------------
 // ছোট সাহায্যকারী ফাংশন
@@ -153,7 +107,9 @@ DateTime addDays(DateTime d, int n) => DateTime(d.year, d.month, d.day + n);
 
 Map<String, String> mapOf(dynamic raw) {
   if (raw == null) return {};
-  return Map<String, String>.from(raw as Map);
+  final out = <String, String>{};
+  (raw as Map).forEach((k, v) => out[k.toString()] = v.toString());
+  return out;
 }
 
 double numOf(dynamic v) => (v as num?)?.toDouble() ?? 0.0;
@@ -186,7 +142,7 @@ String fmtTime(int m) {
 }
 
 String fmtRange(String key) =>
-    '${fmtTime(kSchedule[key]![0])} – ${fmtTime(kSchedule[key]![1])}';
+    '${fmtTime(data.schedule[key]![0])} – ${fmtTime(data.schedule[key]![1])}';
 
 String fmtNoticeTime(String iso) {
   final dt = DateTime.parse(iso);
@@ -222,43 +178,10 @@ Future<String?> pickOption(
 }
 
 // ---------------------------------------------------------------
-// শিক্ষার্থীর তথ্য লোড ও সেভ
+// অনলাইন ডেটা (Firestore) — সব ফোনে একই তথ্য
 // ---------------------------------------------------------------
 double balOf(Map<String, dynamic> s) =>
     numOf(s['op']) + numOf(s['pd']) - numOf(s['pc']);
-
-Future<List<Map<String, dynamic>>> loadStudents() async {
-  final prefs = await SharedPreferences.getInstance();
-  final data = prefs.getString('students');
-  if (data == null) return [];
-  final list = jsonDecode(data) as List;
-  // গতকালের মিল দিন রাখা হয়, কারণ আজ সকালের খাবার সেটারই অংশ
-  final keepFrom = isoOf(addDays(todayDate(), -1));
-  final loaded = list.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-  for (final s in loaded) {
-    final meals = mapOf(s['meals']);
-    meals.removeWhere((k, v) => k.compareTo(keepFrom) < 0);
-    s['meals'] = meals;
-    s['eaten'] = mapOf(s['eaten']);
-    if (s['pd'] == null) {
-      // পুরোনো ডেটা নতুন হিসাব-কাঠামোতে আনা
-      final dep = numOf(s['deposit']);
-      final bal = numOf(s['balance']);
-      s['op'] = 0.0;
-      s['pd'] = dep;
-      s['pc'] = dep - bal;
-    }
-    s['slots'] = (s['slots'] as num?)?.toInt() ?? 0;
-    s['history'] = (s['history'] as List?)
-            ?.map((e) => Map<String, dynamic>.from(e as Map))
-            .toList() ??
-        <Map<String, dynamic>>[];
-  }
-  return loaded;
-}
-
-Future<void> saveStudents(List<Map<String, dynamic>> students) =>
-    putString('students', jsonEncode(students));
 
 int countEaten(Map<String, dynamic> s, String fromIso, String toIso) {
   final eaten = mapOf(s['eaten']);
@@ -268,6 +191,185 @@ int countEaten(Map<String, dynamic> s, String fromIso, String toIso) {
   });
   return n;
 }
+
+void normalizeStudent(Map<String, dynamic> s) {
+  // গতকালের মিল দিন রাখা হয়, কারণ আজ সকালের খাবার সেটারই অংশ
+  final keepFrom = isoOf(addDays(todayDate(), -1));
+  final meals = mapOf(s['meals']);
+  meals.removeWhere((k, v) => k.compareTo(keepFrom) < 0);
+  s['meals'] = meals;
+  s['eaten'] = mapOf(s['eaten']);
+  s['op'] = numOf(s['op']);
+  s['pd'] = numOf(s['pd']);
+  s['pc'] = numOf(s['pc']);
+  s['slots'] = (s['slots'] as num?)?.toInt() ?? 0;
+  s['history'] = (s['history'] as List?)
+          ?.map((e) => Map<String, dynamic>.from(e as Map))
+          .toList() ??
+      <Map<String, dynamic>>[];
+}
+
+class AppData extends ChangeNotifier {
+  List<Map<String, dynamic>> students = [];
+  List<Map<String, dynamic>> notices = [];
+  Map<String, List<int>> schedule = copyDefaultSchedule();
+  String managerPin = '1234';
+  String managerRoom = '';
+  String periodStart = isoOf(todayDate());
+
+  bool studentsLoaded = false;
+  bool configLoaded = false;
+  bool dark = false; // শুধু এই ফোনের পছন্দ
+
+  FirebaseFirestore get _fs => FirebaseFirestore.instance;
+  DocumentReference<Map<String, dynamic>> get _cfg =>
+      _fs.collection('config').doc('app');
+
+  void start() {
+    _fs.collection('students').snapshots().listen((snap) {
+      final list = <Map<String, dynamic>>[];
+      for (final d in snap.docs) {
+        final s = Map<String, dynamic>.from(d.data());
+        normalizeStudent(s);
+        list.add(s);
+      }
+      list.sort((a, b) =>
+          ((a['id'] as num?) ?? 0).compareTo((b['id'] as num?) ?? 0));
+      students = list;
+      if (!snap.metadata.isFromCache || list.isNotEmpty) {
+        studentsLoaded = true;
+      }
+      notifyListeners();
+    }, onError: (_) {});
+
+    _cfg.snapshots().listen((doc) {
+      if (!doc.exists) {
+        // একদম প্রথমবার: সার্ভারে সত্যিই কিছু না থাকলে ডিফল্ট বসানো হয়
+        if (!doc.metadata.isFromCache) {
+          _cfg.set({
+            'managerPin': managerPin,
+            'managerRoom': managerRoom,
+            'periodStart': periodStart,
+            'schedule': kDefaultSchedule,
+          }).catchError((_) {});
+        }
+        return;
+      }
+      final m = doc.data() ?? {};
+      managerPin = (m['managerPin'] ?? '1234').toString();
+      managerRoom = (m['managerRoom'] ?? '').toString();
+      periodStart = (m['periodStart'] ?? periodStart).toString();
+      final sc = m['schedule'];
+      if (sc is Map) {
+        for (final k in ['b', 'l', 'd']) {
+          final v = sc[k];
+          if (v is List && v.length == 2) {
+            schedule[k] = [(v[0] as num).toInt(), (v[1] as num).toInt()];
+          }
+        }
+      }
+      configLoaded = true;
+      notifyListeners();
+    }, onError: (_) {});
+
+    _fs.collection('notices').orderBy('at').snapshots().listen((snap) {
+      notices = snap.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data());
+        m['id'] = d.id;
+        return m;
+      }).toList();
+      notifyListeners();
+    }, onError: (_) {});
+  }
+
+  Future<bool> ensureLoaded({bool needConfig = false}) async {
+    final end = DateTime.now().add(const Duration(seconds: 8));
+    while (DateTime.now().isBefore(end)) {
+      if (studentsLoaded && (!needConfig || configLoaded)) return true;
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    return studentsLoaded && (!needConfig || configLoaded);
+  }
+
+  // ---- লেখা (অনলাইনে না থাকলেও ফোনে জমে থাকে, নেট এলে সিঙ্ক হয়) ----
+  void saveStudent(Map<String, dynamic> s) {
+    notifyListeners();
+    _fs
+        .collection('students')
+        .doc('${s['id']}')
+        .set(s)
+        .catchError((_) {});
+  }
+
+  void deleteStudent(Map<String, dynamic> s) {
+    students.remove(s);
+    notifyListeners();
+    _fs.collection('students').doc('${s['id']}').delete().catchError((_) {});
+  }
+
+  void saveConfig() {
+    notifyListeners();
+    _cfg.set({
+      'managerPin': managerPin,
+      'managerRoom': managerRoom,
+      'periodStart': periodStart,
+      'schedule': schedule,
+    }, SetOptions(merge: true)).catchError((_) {});
+  }
+
+  void addNotice(String text) {
+    _fs.collection('notices').add({
+      'text': text,
+      'at': DateTime.now().toIso8601String(),
+    }).catchError((_) {});
+  }
+
+  void deleteNotice(String id) {
+    _fs.collection('notices').doc(id).delete().catchError((_) {});
+  }
+
+  // নতুন ৪ দিনের হিসাব: চলমান হিসাব ইতিহাসে জমা হয়
+  void commitPeriod() {
+    final today = todayDate();
+    final fromIso = periodStart;
+    final toIso = isoOf(today);
+    final batch = _fs.batch();
+    for (final s in students) {
+      final cl = balOf(s);
+      final hist = (s['history'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      hist.add({
+        'from': fromIso,
+        'to': toIso,
+        'op': numOf(s['op']),
+        'pd': numOf(s['pd']),
+        'pc': numOf(s['pc']),
+        'cl': cl,
+        'slots': s['slots'] ?? 0,
+        'ate': countEaten(s, fromIso, toIso),
+      });
+      s['history'] = hist;
+      s['op'] = cl;
+      s['pd'] = 0.0;
+      s['pc'] = 0.0;
+      s['slots'] = 0;
+      batch.set(_fs.collection('students').doc('${s['id']}'), s);
+    }
+    periodStart = toIso;
+    batch.set(_cfg, {'periodStart': toIso}, SetOptions(merge: true));
+    batch.commit().catchError((_) {});
+    notifyListeners();
+  }
+
+  void setDark(bool v) {
+    dark = v;
+    notifyListeners();
+    SharedPreferences.getInstance().then((p) => p.setBool('dark', v));
+  }
+}
+
+final AppData data = AppData();
 
 // ---------------------------------------------------------------
 // মিলের লাইন (কার্ডে দেখানোর জন্য)
@@ -295,10 +397,11 @@ List<String> activeLines(Map<String, dynamic> s) {
     final v = meals[k] ?? '';
     if (v.isEmpty) continue;
     if (k.compareTo(todayIso) >= 0) {
-      lines.add('${dateLabel(DateTime.parse(k))}: ${cycleNames(v, eaten[k] ?? '')}');
+      lines.add(
+          '${dateLabel(DateTime.parse(k))}: ${cycleNames(v, eaten[k] ?? '')}');
     } else if (k == yIso &&
         v.contains('b') &&
-        nowMinutes() < kSchedule['l']![0]) {
+        nowMinutes() < data.schedule['l']![0]) {
       final e = (eaten[k] ?? '').contains('b') ? ' ✓' : '';
       lines.add('${dateLabel(today)}: সকাল$e');
     }
@@ -320,8 +423,8 @@ int activeDays(Map<String, dynamic> s) {
 // সবার জন্য ছোট উইজেট
 // ---------------------------------------------------------------
 Widget noticeBanner({VoidCallback? onTap}) {
-  final text = kNotices.isNotEmpty
-      ? (kNotices.last['text'] ?? '')
+  final text = data.notices.isNotEmpty
+      ? (data.notices.last['text'] ?? '').toString()
       : 'কোনো নতুন নোটিশ নেই।';
   return GestureDetector(
     onTap: onTap,
@@ -436,43 +539,37 @@ Widget scheduleCard() {
 // ---------------------------------------------------------------
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await loadAppData();
+  await Firebase.initializeApp(options: kFirebaseOptions);
+  final prefs = await SharedPreferences.getInstance();
+  data.dark = prefs.getBool('dark') ?? false;
+  data.start();
   runApp(const OssimApp());
 }
 
-class OssimApp extends StatefulWidget {
+class OssimApp extends StatelessWidget {
   const OssimApp({super.key});
 
   @override
-  State<OssimApp> createState() => _OssimAppState();
-}
-
-class _OssimAppState extends State<OssimApp> {
-  void _toggleTheme(bool isDark) {
-    setState(() {
-      kDark = isDark;
-    });
-    saveDark();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Ossim',
-      themeMode: kDark ? ThemeMode.dark : ThemeMode.light,
-      theme: ThemeData(
-        brightness: Brightness.light,
-        colorSchemeSeed: Colors.teal,
-        scaffoldBackgroundColor: const Color(0xFFAFAFAF),
-        useMaterial3: true,
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Ossim',
+        themeMode: data.dark ? ThemeMode.dark : ThemeMode.light,
+        theme: ThemeData(
+          brightness: Brightness.light,
+          colorSchemeSeed: Colors.teal,
+          scaffoldBackgroundColor: const Color(0xFFAFAFAF),
+          useMaterial3: true,
+        ),
+        darkTheme: ThemeData(
+          brightness: Brightness.dark,
+          colorSchemeSeed: Colors.teal,
+          useMaterial3: true,
+        ),
+        home: const LoginScreen(),
       ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorSchemeSeed: Colors.teal,
-        useMaterial3: true,
-      ),
-      home: LoginScreen(onThemeChanged: _toggleTheme),
     );
   }
 }
@@ -481,8 +578,7 @@ class _OssimAppState extends State<OssimApp> {
 // লগইন: শিক্ষার্থী / ম্যানেজার
 // ---------------------------------------------------------------
 class LoginScreen extends StatefulWidget {
-  final Function(bool) onThemeChanged;
-  const LoginScreen({super.key, required this.onThemeChanged});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -490,6 +586,7 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   bool manager = false;
+  bool busy = false;
   final TextEditingController idC = TextEditingController();
   final TextEditingController pinC = TextEditingController();
   String error = '';
@@ -507,7 +604,18 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => error = 'নাম বা নম্বর লিখুন');
       return;
     }
-    final students = await loadStudents();
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final ok = await data.ensureLoaded();
+    if (!mounted) return;
+    setState(() => busy = false);
+    if (!ok) {
+      setState(() => error = 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন');
+      return;
+    }
+    final students = data.students;
     var found = students
         .where((s) =>
             s['id'].toString() == q || normSearch(s['name'].toString()) == q)
@@ -517,7 +625,6 @@ class _LoginScreenState extends State<LoginScreen> {
           .where((s) => normSearch(s['name'].toString()).contains(q))
           .toList();
     }
-    if (!mounted) return;
     if (found.isEmpty) {
       setState(() => error = 'কোনো শিক্ষার্থী পাওয়া যায়নি');
       return;
@@ -529,24 +636,30 @@ class _LoginScreenState extends State<LoginScreen> {
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => StudentScreen(
-          studentId: found.first['id'] as int,
-          onThemeChanged: widget.onThemeChanged,
-        ),
+        builder: (_) => StudentScreen(studentId: found.first['id'] as int),
       ),
     );
   }
 
-  void _managerLogin() {
-    if (pinC.text.trim() != kManagerPin) {
+  Future<void> _managerLogin() async {
+    setState(() {
+      busy = true;
+      error = '';
+    });
+    final ok = await data.ensureLoaded(needConfig: true);
+    if (!mounted) return;
+    setState(() => busy = false);
+    if (!ok) {
+      setState(() => error = 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন');
+      return;
+    }
+    if (pinC.text.trim() != data.managerPin) {
       setState(() => error = 'পিন ভুল হয়েছে');
       return;
     }
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(
-        builder: (_) => HomeScreen(onThemeChanged: widget.onThemeChanged),
-      ),
+      MaterialPageRoute(builder: (_) => const HomeScreen()),
     );
   }
 
@@ -622,6 +735,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
                   child: Text(error,
+                      textAlign: TextAlign.center,
                       style: const TextStyle(color: Colors.red, fontSize: 13)),
                 ),
               const SizedBox(height: 14),
@@ -633,11 +747,20 @@ class _LoginScreenState extends State<LoginScreen> {
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
-                  onPressed: manager ? _managerLogin : _studentLogin,
-                  child: Text(
-                    manager ? 'ম্যানেজার হিসেবে ঢুকুন' : 'প্রবেশ করুন',
-                    style: const TextStyle(fontSize: 16),
-                  ),
+                  onPressed: busy
+                      ? null
+                      : (manager ? _managerLogin : _studentLogin),
+                  child: busy
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white),
+                        )
+                      : Text(
+                          manager ? 'ম্যানেজার হিসেবে ঢুকুন' : 'প্রবেশ করুন',
+                          style: const TextStyle(fontSize: 16),
+                        ),
                 ),
               ),
             ],
@@ -648,232 +771,200 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
+void goLogin(BuildContext context) {
+  Navigator.pushAndRemoveUntil(
+    context,
+    MaterialPageRoute(builder: (_) => const LoginScreen()),
+    (r) => false,
+  );
+}
+
 // ---------------------------------------------------------------
 // শিক্ষার্থীর স্ক্রিন
 // ---------------------------------------------------------------
-class StudentScreen extends StatefulWidget {
+class StudentScreen extends StatelessWidget {
   final int studentId;
-  final Function(bool) onThemeChanged;
-  const StudentScreen({
-    super.key,
-    required this.studentId,
-    required this.onThemeChanged,
-  });
-
-  @override
-  State<StudentScreen> createState() => _StudentScreenState();
-}
-
-class _StudentScreenState extends State<StudentScreen> {
-  Map<String, dynamic>? me;
-  bool loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _reload();
-  }
-
-  Future<void> _reload() async {
-    final list = await loadStudents();
-    Map<String, dynamic>? found;
-    for (final s in list) {
-      if (s['id'] == widget.studentId) found = s;
-    }
-    if (!mounted) return;
-    setState(() {
-      me = found;
-      loading = false;
-    });
-  }
-
-  void _logout() {
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(
-        builder: (_) => LoginScreen(onThemeChanged: widget.onThemeChanged),
-      ),
-      (r) => false,
-    );
-  }
+  const StudentScreen({super.key, required this.studentId});
 
   @override
   Widget build(BuildContext context) {
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    final s = me;
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        Map<String, dynamic>? s;
+        for (final x in data.students) {
+          if (x['id'] == studentId) s = x;
+        }
+        final startDate = DateTime.parse(data.periodStart);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Ossim'),
-        backgroundColor: Colors.teal,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
-            onPressed: () => widget.onThemeChanged(!isDark),
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('Ossim'),
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+            actions: [
+              IconButton(
+                icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
+                onPressed: () => data.setDark(!isDark),
+              ),
+              IconButton(
+                icon: const Icon(Icons.notifications),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const NoticesScreen(isManager: false),
+                    ),
+                  );
+                },
+              ),
+              IconButton(
+                icon: const Icon(Icons.logout),
+                onPressed: () => goLogin(context),
+              ),
+            ],
           ),
-          IconButton(
-            icon: const Icon(Icons.notifications),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const NoticesScreen(isManager: false),
-                ),
-              ).then((_) => setState(() {}));
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _logout,
-          ),
-        ],
-      ),
-      body: loading
-          ? const Center(child: CircularProgressIndicator())
-          : s == null
+          body: s == null
               ? const Center(child: Text('আপনার তথ্য পাওয়া যায়নি।'))
-              : RefreshIndicator(
-                  onRefresh: _reload,
-                  child: ListView(
-                    padding: const EdgeInsets.all(12),
-                    children: [
-                      noticeBanner(onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) =>
-                                const NoticesScreen(isManager: false),
-                          ),
-                        ).then((_) => setState(() {}));
-                      }),
-                      Card(
-                        margin: const EdgeInsets.only(top: 10),
-                        child: ListTile(
-                          leading: const Icon(Icons.admin_panel_settings,
-                              color: Colors.teal, size: 30),
-                          title: const Text('বর্তমান ম্যানেজার',
-                              style: TextStyle(fontSize: 12)),
-                          subtitle: Text(
-                            kManagerRoom.isEmpty
-                                ? 'এখনও নির্ধারণ করা হয়নি'
-                                : 'রুম $kManagerRoom এর ভাইয়েরা',
-                            style: const TextStyle(
-                                fontSize: 15, fontWeight: FontWeight.bold),
-                          ),
+              : ListView(
+                  padding: const EdgeInsets.all(12),
+                  children: [
+                    noticeBanner(onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) =>
+                              const NoticesScreen(isManager: false),
+                        ),
+                      );
+                    }),
+                    Card(
+                      margin: const EdgeInsets.only(top: 10),
+                      child: ListTile(
+                        leading: const Icon(Icons.admin_panel_settings,
+                            color: Colors.teal, size: 30),
+                        title: const Text('বর্তমান ম্যানেজার',
+                            style: TextStyle(fontSize: 12)),
+                        subtitle: Text(
+                          data.managerRoom.isEmpty
+                              ? 'এখনও নির্ধারণ করা হয়নি'
+                              : 'রুম ${data.managerRoom} এর ভাইয়েরা',
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.bold),
                         ),
                       ),
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  CircleAvatar(
-                                    radius: 22,
-                                    backgroundColor: Colors.teal,
-                                    foregroundColor: Colors.white,
-                                    child: Text('${s['id']}'),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(s['name'],
-                                          style: const TextStyle(
-                                              fontSize: 18,
-                                              fontWeight: FontWeight.bold)),
-                                      Text(
-                                          'বর্ষ: ${s['year']} | রুম: ${s['room']}',
-                                          style:
-                                              const TextStyle(fontSize: 12)),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 10),
-                              Text(
-                                'চলমান হিসাব (${shortDate(DateTime.parse(kPeriodStart))} – ${shortDate(addDays(DateTime.parse(kPeriodStart), kPeriodDays - 1))})',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold),
-                              ),
-                              const SizedBox(height: 4),
-                              accountRows(numOf(s['op']), numOf(s['pd']),
-                                  numOf(s['pc']), balOf(s)),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: TextButton.icon(
-                                  onPressed: () {
-                                    Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            HistoryScreen(student: s),
-                                      ),
-                                    );
-                                  },
-                                  icon: const Icon(Icons.history),
-                                  label: const Text(
-                                      'আগের সব হিসাব দেখুন (ইতিহাস)'),
+                    ),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                CircleAvatar(
+                                  radius: 22,
+                                  backgroundColor: Colors.teal,
+                                  foregroundColor: Colors.white,
+                                  child: Text('${s['id']}'),
                                 ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      Card(
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  const Icon(Icons.restaurant, size: 18),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    activeDays(s) > 0
-                                        ? 'আপনার মিল: ${activeDays(s)} দিন চালু'
-                                        : (activeLines(s).isNotEmpty
-                                            ? 'আপনার মিল চালু'
-                                            : 'আপনার মিল বন্ধ'),
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.bold),
-                                  ),
-                                ],
-                              ),
-                              for (final line in activeLines(s))
-                                Padding(
-                                  padding:
-                                      const EdgeInsets.only(left: 24, top: 3),
-                                  child: Text(line),
+                                const SizedBox(width: 10),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(s['name'].toString(),
+                                        style: const TextStyle(
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.bold)),
+                                    Text(
+                                        'বর্ষ: ${s['year']} | রুম: ${s['room']}',
+                                        style: const TextStyle(fontSize: 12)),
+                                  ],
                                 ),
-                            ],
-                          ),
+                              ],
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              'চলমান হিসাব (${shortDate(startDate)} – ${shortDate(addDays(startDate, kPeriodDays - 1))})',
+                              style:
+                                  const TextStyle(fontWeight: FontWeight.bold),
+                            ),
+                            const SizedBox(height: 4),
+                            accountRows(numOf(s['op']), numOf(s['pd']),
+                                numOf(s['pc']), balOf(s)),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton.icon(
+                                onPressed: () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          HistoryScreen(studentId: studentId),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.history),
+                                label: const Text(
+                                    'আগের সব হিসাব দেখুন (ইতিহাস)'),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const Padding(
-                        padding: EdgeInsets.only(top: 12, bottom: 2),
-                        child: Text('⏰ খাবারের সময়-সূচি',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.teal)),
+                    ),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.restaurant, size: 18),
+                                const SizedBox(width: 6),
+                                Text(
+                                  activeDays(s) > 0
+                                      ? 'আপনার মিল: ${activeDays(s)} দিন চালু'
+                                      : (activeLines(s).isNotEmpty
+                                          ? 'আপনার মিল চালু'
+                                          : 'আপনার মিল বন্ধ'),
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                            for (final line in activeLines(s))
+                              Padding(
+                                padding:
+                                    const EdgeInsets.only(left: 24, top: 3),
+                                child: Text(line),
+                              ),
+                          ],
+                        ),
                       ),
-                      scheduleCard(),
-                      const Padding(
-                        padding: EdgeInsets.only(top: 12, bottom: 2),
-                        child: Text('🍽️ মূল্য তালিকা (প্রতি দিন)',
-                            style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.teal)),
-                      ),
-                      priceCard(),
-                    ],
-                  ),
+                    ),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 12, bottom: 2),
+                      child: Text('⏰ খাবারের সময়-সূচি',
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.teal)),
+                    ),
+                    scheduleCard(),
+                    const Padding(
+                      padding: EdgeInsets.only(top: 12, bottom: 2),
+                      child: Text('🍽️ মূল্য তালিকা (প্রতি দিন)',
+                          style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.teal)),
+                    ),
+                    priceCard(),
+                  ],
                 ),
+        );
+      },
     );
   }
 }
@@ -882,95 +973,114 @@ class _StudentScreenState extends State<StudentScreen> {
 // হিসাবের ইতিহাস
 // ---------------------------------------------------------------
 class HistoryScreen extends StatelessWidget {
-  final Map<String, dynamic> student;
-  const HistoryScreen({super.key, required this.student});
+  final int studentId;
+  const HistoryScreen({super.key, required this.studentId});
 
   @override
   Widget build(BuildContext context) {
-    final hist = (student['history'] as List)
-        .map((e) => Map<String, dynamic>.from(e as Map))
-        .toList()
-        .reversed
-        .toList();
-    final start = DateTime.parse(kPeriodStart);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('হিসাবের ইতিহাস'),
-        backgroundColor: Colors.teal,
-        foregroundColor: Colors.white,
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(12),
-        children: [
-          Card(
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-              side: const BorderSide(color: Colors.teal),
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        Map<String, dynamic>? student;
+        for (final x in data.students) {
+          if (x['id'] == studentId) student = x;
+        }
+        if (student == null) {
+          return Scaffold(
+            appBar: AppBar(
+              title: const Text('হিসাবের ইতিহাস'),
+              backgroundColor: Colors.teal,
+              foregroundColor: Colors.white,
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            body: const Center(child: Text('তথ্য পাওয়া যায়নি।')),
+          );
+        }
+        final hist = (student['history'] as List)
+            .map((e) => Map<String, dynamic>.from(e as Map))
+            .toList()
+            .reversed
+            .toList();
+        final start = DateTime.parse(data.periodStart);
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('হিসাবের ইতিহাস'),
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(12),
+            children: [
+              Card(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: const BorderSide(color: Colors.teal),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('চলমান হিসাব',
-                          style: TextStyle(fontWeight: FontWeight.bold)),
-                      Text(
-                          '${shortDate(start)} – ${shortDate(addDays(start, kPeriodDays - 1))}',
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.teal)),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('চলমান হিসাব',
+                              style: TextStyle(fontWeight: FontWeight.bold)),
+                          Text(
+                              '${shortDate(start)} – ${shortDate(addDays(start, kPeriodDays - 1))}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.teal)),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      accountRows(numOf(student['op']), numOf(student['pd']),
+                          numOf(student['pc']), balOf(student)),
                     ],
                   ),
-                  const SizedBox(height: 6),
-                  accountRows(numOf(student['op']), numOf(student['pd']),
-                      numOf(student['pc']), balOf(student)),
-                ],
-              ),
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
-            child: Text('আগের হিসাব (${bnDigits('${hist.length}')}টি)',
-                style: const TextStyle(fontSize: 13)),
-          ),
-          if (hist.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: Center(child: Text('এখনও কোনো আগের হিসাব নেই।')),
-            ),
-          for (final h in hist)
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          '${shortDate(DateTime.parse(h['from'] as String))} – ${shortDate(DateTime.parse(h['to'] as String))}',
-                          style:
-                              const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          'বেলা ${bnDigits('${h['slots'] ?? 0}')} | খেয়েছে ${bnDigits('${h['ate'] ?? 0}')}',
-                          style: const TextStyle(fontSize: 11),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    accountRows(numOf(h['op']), numOf(h['pd']),
-                        numOf(h['pc']), numOf(h['cl'])),
-                  ],
                 ),
               ),
-            ),
-        ],
-      ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+                child: Text('আগের হিসাব (${bnDigits('${hist.length}')}টি)',
+                    style: const TextStyle(fontSize: 13)),
+              ),
+              if (hist.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: Text('এখনও কোনো আগের হিসাব নেই।')),
+                ),
+              for (final h in hist)
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              '${shortDate(DateTime.parse(h['from'] as String))} – ${shortDate(DateTime.parse(h['to'] as String))}',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              'বেলা ${bnDigits('${h['slots'] ?? 0}')} | খেয়েছে ${bnDigits('${h['ate'] ?? 0}')}',
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        accountRows(numOf(h['op']), numOf(h['pd']),
+                            numOf(h['pc']), numOf(h['cl'])),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -978,16 +1088,11 @@ class HistoryScreen extends StatelessWidget {
 // ---------------------------------------------------------------
 // নোটিফিকেশন
 // ---------------------------------------------------------------
-class NoticesScreen extends StatefulWidget {
+class NoticesScreen extends StatelessWidget {
   final bool isManager;
   const NoticesScreen({super.key, required this.isManager});
 
-  @override
-  State<NoticesScreen> createState() => _NoticesScreenState();
-}
-
-class _NoticesScreenState extends State<NoticesScreen> {
-  void _compose() {
+  void _compose(BuildContext context) {
     final c = TextEditingController();
     showDialog(
       context: context,
@@ -1010,13 +1115,7 @@ class _NoticesScreenState extends State<NoticesScreen> {
             onPressed: () {
               final t = c.text.trim();
               if (t.isEmpty) return;
-              setState(() {
-                kNotices.add({
-                  'text': t,
-                  'at': DateTime.now().toIso8601String(),
-                });
-              });
-              saveNotices();
+              data.addNotice(t);
               Navigator.pop(ctx);
             },
             child: const Text('পাঠান'),
@@ -1028,55 +1127,58 @@ class _NoticesScreenState extends State<NoticesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final items = kNotices.asMap().entries.toList().reversed.toList();
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('নোটিফিকেশন'),
-        backgroundColor: Colors.teal,
-        foregroundColor: Colors.white,
-      ),
-      floatingActionButton: widget.isManager
-          ? FloatingActionButton.extended(
-              onPressed: _compose,
-              backgroundColor: Colors.teal,
-              foregroundColor: Colors.white,
-              icon: const Icon(Icons.send),
-              label: const Text('নতুন নোটিফিকেশন'),
-            )
-          : null,
-      body: items.isEmpty
-          ? const Center(child: Text('কোনো নোটিফিকেশন নেই।'))
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
-              children: [
-                if (widget.isManager)
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      'নোটিফিকেশন এই ফোনের অ্যাপে সেভ হয়। অন্য ফোনে পৌঁছাতে অনলাইন সার্ভার লাগবে।',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                  ),
-                for (final e in items)
-                  Card(
-                    child: ListTile(
-                      title: Text(e.value['text'] ?? ''),
-                      subtitle: Text(fmtNoticeTime(e.value['at']!),
-                          style: const TextStyle(fontSize: 11)),
-                      trailing: widget.isManager
-                          ? IconButton(
-                              icon: const Icon(Icons.delete, color: Colors.red),
-                              onPressed: () {
-                                setState(() => kNotices.removeAt(e.key));
-                                saveNotices();
-                              },
-                            )
-                          : null,
-                    ),
-                  ),
-              ],
-            ),
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        final items = data.notices.reversed.toList();
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('নোটিফিকেশন'),
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+          ),
+          floatingActionButton: isManager
+              ? FloatingActionButton.extended(
+                  onPressed: () => _compose(context),
+                  backgroundColor: Colors.teal,
+                  foregroundColor: Colors.white,
+                  icon: const Icon(Icons.send),
+                  label: const Text('নতুন নোটিফিকেশন'),
+                )
+              : null,
+          body: items.isEmpty
+              ? const Center(child: Text('কোনো নোটিফিকেশন নেই।'))
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 90),
+                  children: [
+                    if (isManager)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          'পাঠানো নোটিফিকেশন সবার অ্যাপে দেখা যাবে (অ্যাপ খুললে বা খোলা থাকলে)। ফোনে আলাদা শব্দ বা পপআপ আসবে না।',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    for (final n in items)
+                      Card(
+                        child: ListTile(
+                          title: Text((n['text'] ?? '').toString()),
+                          subtitle: Text(fmtNoticeTime(n['at'].toString()),
+                              style: const TextStyle(fontSize: 11)),
+                          trailing: isManager
+                              ? IconButton(
+                                  icon: const Icon(Icons.delete,
+                                      color: Colors.red),
+                                  onPressed: () =>
+                                      data.deleteNotice(n['id'].toString()),
+                                )
+                              : null,
+                        ),
+                      ),
+                  ],
+                ),
+        );
+      },
     );
   }
 }
@@ -1085,8 +1187,7 @@ class _NoticesScreenState extends State<NoticesScreen> {
 // ম্যানেজারের হোম
 // ---------------------------------------------------------------
 class HomeScreen extends StatefulWidget {
-  final Function(bool) onThemeChanged;
-  const HomeScreen({super.key, required this.onThemeChanged});
+  const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -1094,25 +1195,10 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   String searchQuery = '';
-  List<Map<String, dynamic>> students = [];
 
   static const int maxMealDays = 4;
 
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final loaded = await loadStudents();
-    if (!mounted) return;
-    setState(() {
-      students = loaded;
-    });
-  }
-
-  Future<void> _save() => saveStudents(students);
+  List<Map<String, dynamic>> get students => data.students;
 
   int _price(bool b, bool l, bool d) {
     if (b && l && d) return 70;
@@ -1141,19 +1227,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return r;
   }
 
-  void _logout() {
-    Navigator.pushAndRemoveUntil(
-      context,
-      MaterialPageRoute(
-        builder: (_) => LoginScreen(onThemeChanged: widget.onThemeChanged),
-      ),
-      (r) => false,
-    );
-  }
-
   // ---- নতুন ৪ দিনের হিসাব ----
   void _confirmNewPeriod() {
-    final start = DateTime.parse(kPeriodStart);
+    final start = DateTime.parse(data.periodStart);
     final end = addDays(start, kPeriodDays - 1);
     showDialog(
       context: context,
@@ -1169,7 +1245,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           ElevatedButton(
             onPressed: () {
-              _startNewPeriod();
+              data.commitPeriod();
               Navigator.pop(ctx);
             },
             child: const Text('হ্যাঁ, শুরু করুন'),
@@ -1179,40 +1255,8 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _startNewPeriod() {
-    final today = todayDate();
-    final fromIso = kPeriodStart;
-    final toIso = isoOf(today);
-    setState(() {
-      for (final s in students) {
-        final cl = balOf(s);
-        final hist = (s['history'] as List)
-            .map((e) => Map<String, dynamic>.from(e as Map))
-            .toList();
-        hist.add({
-          'from': fromIso,
-          'to': toIso,
-          'op': numOf(s['op']),
-          'pd': numOf(s['pd']),
-          'pc': numOf(s['pc']),
-          'cl': cl,
-          'slots': s['slots'] ?? 0,
-          'ate': countEaten(s, fromIso, toIso),
-        });
-        s['history'] = hist;
-        s['op'] = cl;
-        s['pd'] = 0.0;
-        s['pc'] = 0.0;
-        s['slots'] = 0;
-      }
-      kPeriodStart = toIso;
-    });
-    savePeriodStart();
-    _save();
-  }
-
   Widget _periodCard() {
-    final start = DateTime.parse(kPeriodStart);
+    final start = DateTime.parse(data.periodStart);
     final end = addDays(start, kPeriodDays - 1);
     final today = todayDate();
     final over = today.isAfter(end);
@@ -1262,8 +1306,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
                   '৪ দিন পূর্ণ হয়েছে। নতুন হিসাব শুরু করুন।',
-                  style: TextStyle(
-                      fontSize: 12, color: Colors.orange.shade900),
+                  style:
+                      TextStyle(fontSize: 12, color: Colors.orange.shade900),
                 ),
               ),
           ],
@@ -1340,25 +1384,24 @@ class _HomeScreenState extends State<HomeScreen> {
                 final deposit = double.tryParse(depositC.text.trim()) ?? 0.0;
                 int nextId = 1;
                 for (final s in students) {
-                  final id = s['id'] as int;
+                  final id = (s['id'] as num).toInt();
                   if (id >= nextId) nextId = id + 1;
                 }
-                setState(() {
-                  students.add({
-                    'id': nextId,
-                    'name': name,
-                    'year': yearC.text,
-                    'room': roomC.text.trim(),
-                    'op': 0.0,
-                    'pd': deposit,
-                    'pc': 0.0,
-                    'slots': 0,
-                    'meals': <String, String>{},
-                    'eaten': <String, String>{},
-                    'history': <Map<String, dynamic>>[],
-                  });
-                });
-                _save();
+                final s = <String, dynamic>{
+                  'id': nextId,
+                  'name': name,
+                  'year': yearC.text,
+                  'room': roomC.text.trim(),
+                  'op': 0.0,
+                  'pd': deposit,
+                  'pc': 0.0,
+                  'slots': 0,
+                  'meals': <String, String>{},
+                  'eaten': <String, String>{},
+                  'history': <Map<String, dynamic>>[],
+                };
+                students.add(s);
+                data.saveStudent(s);
                 Navigator.pop(ctx);
               },
               child: const Text('যোগ করুন'),
@@ -1389,10 +1432,8 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: () {
               final amount = double.tryParse(amountC.text.trim()) ?? 0.0;
               if (amount <= 0) return;
-              setState(() {
-                student['pd'] = numOf(student['pd']) + amount;
-              });
-              _save();
+              student['pd'] = numOf(student['pd']) + amount;
+              data.saveStudent(student);
               Navigator.pop(ctx);
             },
             child: const Text('জমা দিন'),
@@ -1514,13 +1555,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       updated[key] = str;
                     }
                   }
-                  setState(() {
-                    student['pc'] = numOf(student['pc']) + total;
-                    student['slots'] =
-                        ((student['slots'] as num?)?.toInt() ?? 0) + newSlots;
-                    student['meals'] = updated;
-                  });
-                  _save();
+                  student['pc'] = numOf(student['pc']) + total;
+                  student['slots'] =
+                      ((student['slots'] as num?)?.toInt() ?? 0) + newSlots;
+                  student['meals'] = updated;
+                  data.saveStudent(student);
                   Navigator.pop(ctx);
                 },
                 child: const Text('চালু করুন'),
@@ -1545,8 +1584,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           ElevatedButton(
             onPressed: () {
-              setState(() => students.remove(student));
-              _save();
+              data.deleteStudent(student);
               Navigator.pop(ctx);
             },
             child: const Text('হ্যাঁ, ডিলিট'),
@@ -1556,8 +1594,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _openNotices() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const NoticesScreen(isManager: true)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) => _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final q = normSearch(searchQuery);
     final filtered = students.where((s) {
@@ -1575,33 +1627,24 @@ class _HomeScreenState extends State<HomeScreen> {
         actions: [
           IconButton(
             icon: Icon(isDark ? Icons.dark_mode : Icons.light_mode),
-            onPressed: () => widget.onThemeChanged(!isDark),
+            onPressed: () => data.setDark(!isDark),
           ),
           IconButton(
             icon: const Icon(Icons.notifications),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const NoticesScreen(isManager: true),
-                ),
-              ).then((_) => setState(() {}));
-            },
+            onPressed: _openNotices,
           ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(
-                  builder: (_) => const SettingsScreen(),
-                ),
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
               );
             },
           ),
           IconButton(
             icon: const Icon(Icons.logout),
-            onPressed: _logout,
+            onPressed: () => goLogin(context),
           ),
         ],
       ),
@@ -1616,14 +1659,7 @@ class _HomeScreenState extends State<HomeScreen> {
         padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
-            noticeBanner(onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const NoticesScreen(isManager: true),
-                ),
-              ).then((_) => setState(() {}));
-            }),
+            noticeBanner(onTap: _openNotices),
             const SizedBox(height: 10),
             _periodCard(),
             Row(
@@ -1639,13 +1675,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (context) => AttendanceScreen(
-                            students: students,
-                            onChanged: () {
-                              setState(() {});
-                              _save();
-                            },
-                          ),
+                          builder: (_) => const AttendanceScreen(),
                         ),
                       );
                     },
@@ -1661,15 +1691,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              const NoticesScreen(isManager: true),
-                        ),
-                      ).then((_) => setState(() {}));
-                    },
+                    onPressed: _openNotices,
                     icon: const Icon(Icons.send),
                     label: const Text('নোটিফিকেশন'),
                   ),
@@ -1728,7 +1750,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                             CrossAxisAlignment.start,
                                         children: [
                                           Text(
-                                            student['name'],
+                                            student['name'].toString(),
                                             style: const TextStyle(
                                                 fontSize: 18,
                                                 fontWeight: FontWeight.bold),
@@ -1847,13 +1869,7 @@ class _HomeScreenState extends State<HomeScreen> {
 // খাবার চিহ্নিত করা (ম্যানেজার)
 // ---------------------------------------------------------------
 class AttendanceScreen extends StatefulWidget {
-  final List<Map<String, dynamic>> students;
-  final VoidCallback onChanged;
-  const AttendanceScreen({
-    super.key,
-    required this.students,
-    required this.onChanged,
-  });
+  const AttendanceScreen({super.key});
 
   @override
   State<AttendanceScreen> createState() => _AttendanceScreenState();
@@ -1870,10 +1886,10 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
     today = todayDate();
     final n = nowMinutes();
     // সময়-সূচি অনুযায়ী এখন কোন বেলা চলছে তা নিজে থেকে বেছে নেওয়া হয়
-    if (n < kSchedule['l']![0]) {
+    if (n < data.schedule['l']![0]) {
       cycle = addDays(today, -1);
       slot = 2;
-    } else if (n < kSchedule['d']![0]) {
+    } else if (n < data.schedule['d']![0]) {
       cycle = today;
       slot = 0;
     } else {
@@ -1909,12 +1925,21 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
       e[_key] = cur;
     }
     s['eaten'] = e;
+    data.saveStudent(s);
   }
 
   @override
   Widget build(BuildContext context) {
-    final on = widget.students.where(_hasMeal).toList();
-    final off = widget.students.where((s) => !_hasMeal(s)).toList();
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) => _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
+    final all = data.students;
+    final on = all.where(_hasMeal).toList();
+    final off = all.where((s) => !_hasMeal(s)).toList();
     final ateCount = on.where(_ate).length;
     final remaining = on.length - ateCount;
     final canPrev = cycle.isAfter(addDays(today, -1));
@@ -2006,12 +2031,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                 alignment: Alignment.centerRight,
                 child: TextButton(
                   onPressed: () {
-                    setState(() {
-                      for (final s in on) {
-                        _setAte(s, true);
-                      }
-                    });
-                    widget.onChanged();
+                    for (final s in on) {
+                      _setAte(s, true);
+                    }
                   },
                   child: const Text('সবাইকে চিহ্নিত করুন'),
                 ),
@@ -2027,12 +2049,9 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
                           Card(
                             child: CheckboxListTile(
                               value: _ate(s),
-                              onChanged: (v) {
-                                setState(() => _setAte(s, v ?? false));
-                                widget.onChanged();
-                              },
+                              onChanged: (v) => _setAte(s, v ?? false),
                               title: Text(
-                                s['name'],
+                                s['name'].toString(),
                                 style: const TextStyle(
                                     fontWeight: FontWeight.bold),
                               ),
@@ -2073,17 +2092,6 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  List<Map<String, dynamic>> students = [];
-
-  @override
-  void initState() {
-    super.initState();
-    loadStudents().then((l) {
-      if (!mounted) return;
-      setState(() => students = l);
-    });
-  }
-
   void _snack(String msg) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
@@ -2091,12 +2099,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // ---- ম্যানেজারের রুম ----
   void _pickRoom() {
     final rooms = <String>{};
-    for (final s in students) {
+    for (final s in data.students) {
       final r = s['room'].toString();
       if (r.isNotEmpty) rooms.add(r);
     }
     final c = TextEditingController();
-    String selected = kManagerRoom;
+    String selected = data.managerRoom;
 
     showDialog(
       context: context,
@@ -2140,10 +2148,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             ElevatedButton(
               onPressed: () {
-                final room = c.text.trim().isNotEmpty ? c.text.trim() : selected;
+                final room =
+                    c.text.trim().isNotEmpty ? c.text.trim() : selected;
                 if (room.isEmpty) return;
-                setState(() => kManagerRoom = room);
-                saveRoom();
+                data.managerRoom = room;
+                data.saveConfig();
                 Navigator.pop(ctx);
               },
               child: const Text('সেভ করুন'),
@@ -2156,7 +2165,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ---- সময়-সূচি (শুরু ও শেষ) ----
   Future<void> _editSchedule(String key, String name) async {
-    final cur = kSchedule[key]!;
+    final cur = data.schedule[key]!;
     final start = await showTimePicker(
       context: context,
       helpText: '$name - শুরুর সময়',
@@ -2175,13 +2184,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _snack('শেষের সময় শুরুর পরে হতে হবে');
       return;
     }
-    setState(() => kSchedule[key] = [s, e]);
-    await saveSchedule();
+    data.schedule[key] = [s, e];
+    data.saveConfig();
   }
 
-  Future<void> _resetSchedule() async {
-    setState(() => kSchedule = copyDefaultSchedule());
-    await saveSchedule();
+  void _resetSchedule() {
+    data.schedule = copyDefaultSchedule();
+    data.saveConfig();
   }
 
   Widget _scheduleRow(String key, String name) {
@@ -2243,8 +2252,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: const Text('বাতিল'),
             ),
             ElevatedButton(
-              onPressed: () async {
-                if (curC.text.trim() != kManagerPin) {
+              onPressed: () {
+                if (curC.text.trim() != data.managerPin) {
                   setD(() => err = 'বর্তমান পিন ভুল');
                   return;
                 }
@@ -2257,11 +2266,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   setD(() => err = 'নতুন পিন মিলছে না');
                   return;
                 }
-                kManagerPin = np;
-                await savePin();
-                if (!ctx.mounted) return;
+                data.managerPin = np;
+                data.saveConfig();
                 Navigator.pop(ctx);
-                if (mounted) _snack('পিন বদলানো হয়েছে');
+                _snack('পিন বদলানো হয়েছে');
               },
               child: const Text('বদলান'),
             ),
@@ -2273,6 +2281,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) => _buildScaffold(context),
+    );
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     const heading = TextStyle(
         fontSize: 20, fontWeight: FontWeight.bold, color: Colors.teal);
 
@@ -2289,11 +2304,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 6),
           Card(
             child: ListTile(
-              leading: const Icon(Icons.admin_panel_settings,
-                  color: Colors.teal),
-              title: Text(kManagerRoom.isEmpty
+              leading:
+                  const Icon(Icons.admin_panel_settings, color: Colors.teal),
+              title: Text(data.managerRoom.isEmpty
                   ? 'রুম বেছে নিন'
-                  : 'রুম $kManagerRoom'),
+                  : 'রুম ${data.managerRoom}'),
               trailing: const Icon(Icons.arrow_drop_down),
               onTap: _pickRoom,
             ),
