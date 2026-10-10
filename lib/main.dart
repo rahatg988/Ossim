@@ -220,6 +220,12 @@ class AppData extends ChangeNotifier {
   bool studentsLoaded = false;
   bool configLoaded = false;
   bool dark = false; // শুধু এই ফোনের পছন্দ
+  String lastError = ''; // অনলাইন সংযোগের শেষ সমস্যা
+
+  void _err(Object e) {
+    lastError = e.toString();
+    notifyListeners();
+  }
 
   FirebaseFirestore get _fs => FirebaseFirestore.instance;
   DocumentReference<Map<String, dynamic>> get _cfg =>
@@ -238,9 +244,10 @@ class AppData extends ChangeNotifier {
       students = list;
       if (!snap.metadata.isFromCache || list.isNotEmpty) {
         studentsLoaded = true;
+        lastError = '';
       }
       notifyListeners();
-    }, onError: (_) {});
+    }, onError: _err);
 
     _cfg.snapshots().listen((doc) {
       if (!doc.exists) {
@@ -251,7 +258,7 @@ class AppData extends ChangeNotifier {
             'managerRoom': managerRoom,
             'periodStart': periodStart,
             'schedule': kDefaultSchedule,
-          }).catchError((_) {});
+          }).catchError(_err);
         }
         return;
       }
@@ -269,8 +276,9 @@ class AppData extends ChangeNotifier {
         }
       }
       configLoaded = true;
+      lastError = '';
       notifyListeners();
-    }, onError: (_) {});
+    }, onError: _err);
 
     _fs.collection('notices').orderBy('at').snapshots().listen((snap) {
       notices = snap.docs.map((d) {
@@ -279,16 +287,27 @@ class AppData extends ChangeNotifier {
         return m;
       }).toList();
       notifyListeners();
-    }, onError: (_) {});
+    }, onError: _err);
   }
 
-  Future<bool> ensureLoaded({bool needConfig = false}) async {
-    final end = DateTime.now().add(const Duration(seconds: 8));
+  Future<bool> ensureLoaded(
+      {bool needStudents = true, bool needConfig = false}) async {
+    bool ready() =>
+        (!needStudents || studentsLoaded) && (!needConfig || configLoaded);
+    final end = DateTime.now().add(const Duration(seconds: 15));
     while (DateTime.now().isBefore(end)) {
-      if (studentsLoaded && (!needConfig || configLoaded)) return true;
+      if (ready()) return true;
+      if (lastError.isNotEmpty) break; // আসল সমস্যা ধরা পড়লে দেরি না করে জানানো
       await Future.delayed(const Duration(milliseconds: 200));
     }
-    return studentsLoaded && (!needConfig || configLoaded);
+    return ready();
+  }
+
+  String failMessage() {
+    if (lastError.isNotEmpty) {
+      return 'সংযোগে সমস্যা:\n$lastError';
+    }
+    return 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন';
   }
 
   // ---- লেখা (অনলাইনে না থাকলেও ফোনে জমে থাকে, নেট এলে সিঙ্ক হয়) ----
@@ -298,13 +317,13 @@ class AppData extends ChangeNotifier {
         .collection('students')
         .doc('${s['id']}')
         .set(s)
-        .catchError((_) {});
+        .catchError(_err);
   }
 
   void deleteStudent(Map<String, dynamic> s) {
     students.remove(s);
     notifyListeners();
-    _fs.collection('students').doc('${s['id']}').delete().catchError((_) {});
+    _fs.collection('students').doc('${s['id']}').delete().catchError(_err);
   }
 
   void saveConfig() {
@@ -314,18 +333,18 @@ class AppData extends ChangeNotifier {
       'managerRoom': managerRoom,
       'periodStart': periodStart,
       'schedule': schedule,
-    }, SetOptions(merge: true)).catchError((_) {});
+    }, SetOptions(merge: true)).catchError(_err);
   }
 
   void addNotice(String text) {
     _fs.collection('notices').add({
       'text': text,
       'at': DateTime.now().toIso8601String(),
-    }).catchError((_) {});
+    }).then<void>((_) {}).catchError(_err);
   }
 
   void deleteNotice(String id) {
-    _fs.collection('notices').doc(id).delete().catchError((_) {});
+    _fs.collection('notices').doc(id).delete().catchError(_err);
   }
 
   // নতুন ৪ দিনের হিসাব: চলমান হিসাব ইতিহাসে জমা হয়
@@ -358,7 +377,7 @@ class AppData extends ChangeNotifier {
     }
     periodStart = toIso;
     batch.set(_cfg, {'periodStart': toIso}, SetOptions(merge: true));
-    batch.commit().catchError((_) {});
+    batch.commit().catchError(_err);
     notifyListeners();
   }
 
@@ -612,7 +631,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!mounted) return;
     setState(() => busy = false);
     if (!ok) {
-      setState(() => error = 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন');
+      setState(() => error = data.failMessage());
       return;
     }
     final students = data.students;
@@ -646,11 +665,12 @@ class _LoginScreenState extends State<LoginScreen> {
       busy = true;
       error = '';
     });
-    final ok = await data.ensureLoaded(needConfig: true);
+    final ok =
+        await data.ensureLoaded(needStudents: false, needConfig: true);
     if (!mounted) return;
     setState(() => busy = false);
     if (!ok) {
-      setState(() => error = 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন');
+      setState(() => error = data.failMessage());
       return;
     }
     if (pinC.text.trim() != data.managerPin) {
