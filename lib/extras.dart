@@ -7,6 +7,8 @@
 //  4. "খাবার চিহ্নিত করুন" স্ক্রিনে নাম/নম্বর দিয়ে সার্চ
 //  5. কতজন মিল চালু করেছে, ম্যানেজার দেখতে পারবে
 // ---------------------------------------------------------------
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -49,16 +51,30 @@ class ExtraData extends ChangeNotifier {
   Map<String, int> prices = Map<String, int>.from(kDefaultPrices);
   int periodDays = 4;
 
-  DocumentReference<Map<String, dynamic>> get _doc =>
-      FirebaseFirestore.instance.collection('config').doc('extra');
+  StreamSubscription<dynamic>? _sub;
+  String? _hid;
 
-  Future<void> init() async {
-    final p = await SharedPreferences.getInstance();
-    seenOpenAt = p.getInt('seenOpenAt') ?? 0;
+  // এই হলের ডকুমেন্ট: halls/{hallId}
+  DocumentReference<Map<String, dynamic>> get _doc =>
+      FirebaseFirestore.instance.collection('halls').doc(_hid);
+
+  void reset() {
+    _sub?.cancel();
+    _sub = null;
+    _hid = null;
+    mealOpen = false;
+    openAt = 0;
+    seenOpenAt = 0;
+    prices = Map<String, int>.from(kDefaultPrices);
+    periodDays = 4;
   }
 
-  void start() {
-    _doc.snapshots().listen((d) {
+  Future<void> startFor(String hallId) async {
+    reset();
+    _hid = hallId;
+    final p = await SharedPreferences.getInstance();
+    seenOpenAt = p.getInt('seenOpenAt_$hallId') ?? 0;
+    _sub = _doc.snapshots().listen((d) {
       final m = d.data() ?? <String, dynamic>{};
       mealOpen = m['mealOpen'] == true;
       openAt = (m['openAt'] as num?)?.toInt() ?? 0;
@@ -75,14 +91,14 @@ class ExtraData extends ChangeNotifier {
       if (mealOpen && openAt > seenOpenAt) {
         seenOpenAt = openAt;
         SharedPreferences.getInstance()
-            .then((p) => p.setInt('seenOpenAt', openAt));
+            .then((p) => p.setInt('seenOpenAt_$hallId', openAt));
         if (!isManager) {
           HapticFeedback.vibrate();
           messengerKey.currentState?.showSnackBar(
             const SnackBar(
               duration: Duration(seconds: 6),
               content: Text(
-                  '📢 ম্যানেজার মিল চালুর অনুমতি দিয়েছেন। এখন নিজের মিল চালু করতে পারবেন।'),
+                  '📢 ম্যানেজার মিল চালুর অনুমতি দিয়েছেন। এখন নিজের মিল চালু বা বন্ধ করতে পারবেন।'),
             ),
           );
         }
@@ -121,7 +137,7 @@ class ExtraData extends ChangeNotifier {
       openAt = DateTime.now().millisecondsSinceEpoch;
       seenOpenAt = openAt;
       SharedPreferences.getInstance()
-          .then((p) => p.setInt('seenOpenAt', openAt));
+          .then((p) => p.setInt('seenOpenAt_$_hid', openAt));
       data.addNotice(
           'ম্যানেজার মিল চালুর অনুমতি দিয়েছেন। এখন আপনি নিজের মিল চালু করতে পারবেন।');
       HapticFeedback.vibrate();
@@ -163,38 +179,69 @@ String xStr(List<bool> f) {
 void showMealDialog(BuildContext context, Map<String, dynamic> student,
     {bool self = false}) {
   final meals = mapOf(student['meals']);
+  final eaten = mapOf(student['eaten']);
   final today = todayDate();
   final dates = List.generate(kMealDays, (i) => addDays(today, i));
-  final locked = dates.map((d) => xFlags(meals[isoOf(d)])).toList();
-  final sel = locked.map((f) => List<bool>.from(f)).toList();
+  final orig = dates.map((d) => xFlags(meals[isoOf(d)])).toList();
+  // যে বেলা খাওয়া হয়ে গেছে, তা বদলানো যাবে না
+  final ate = dates.map((d) => xFlags(eaten[isoOf(d)])).toList();
+  final sel = orig.map((f) => List<bool>.from(f)).toList();
 
   showDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setDialogState) {
-        int total = 0;
-        int newSlots = 0;
+        int net = 0;
+        int slotDelta = 0;
+        bool changed = false;
         for (int i = 0; i < kMealDays; i++) {
-          total += xPrice(sel[i]) - xPrice(locked[i]);
+          net += xPrice(sel[i]) - xPrice(orig[i]);
           for (int j = 0; j < 3; j++) {
-            if (sel[i][j] && !locked[i][j]) newSlots++;
+            if (sel[i][j] != orig[i][j]) {
+              changed = true;
+              slotDelta += sel[i][j] ? 1 : -1;
+            }
           }
         }
 
         return AlertDialog(
-          title: Text(self
-              ? 'আমার মিল চালু করুন'
-              : '${student['name']} - মিল চালু করুন'),
+          title: Text(self ? 'আমার মিল' : '${student['name']} - মিল'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'মিলের একদিন শুরু হয় দুপুরে। পুরো একদিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল। ধূসর বেলা আগে থেকেই চালু।',
-                  style: TextStyle(fontSize: 13),
+                Text(
+                  self
+                      ? 'অনুমতির সময়ে মিল চালু ও বন্ধ দুটোই করতে পারবেন। মিলের একদিন = দুপুর + রাত + পরদিন সকাল।'
+                      : 'যেকোনো সময় চালু বা বন্ধ করা যাবে। মিলের একদিন = দুপুর + রাত + পরদিন সকাল। খাওয়া হয়ে যাওয়া বেলা বদলানো যাবে না।',
+                  style: const TextStyle(fontSize: 13),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: () => setDialogState(() {
+                        for (int i = 0; i < kMealDays; i++) {
+                          for (int j = 0; j < 3; j++) {
+                            if (!ate[i][j]) sel[i][j] = true;
+                          }
+                        }
+                      }),
+                      child: const Text('সব চালু'),
+                    ),
+                    TextButton(
+                      onPressed: () => setDialogState(() {
+                        for (int i = 0; i < kMealDays; i++) {
+                          for (int j = 0; j < 3; j++) {
+                            if (!ate[i][j]) sel[i][j] = false;
+                          }
+                        }
+                      }),
+                      child: const Text('সব বন্ধ'),
+                    ),
+                  ],
+                ),
                 for (int i = 0; i < kMealDays; i++)
                   Container(
                     margin: const EdgeInsets.symmetric(vertical: 4),
@@ -206,26 +253,9 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Expanded(
-                              child: Text(dateLabel(dates[i]),
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold)),
-                            ),
-                            GestureDetector(
-                              onTap: () => setDialogState(() {
-                                for (int j = 0; j < 3; j++) {
-                                  sel[i][j] = true;
-                                }
-                              }),
-                              child: const Text('পুরো দিন',
-                                  style: TextStyle(
-                                      color: Colors.teal, fontSize: 13)),
-                            ),
-                          ],
-                        ),
+                        Text(dateLabel(dates[i]),
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
                         const SizedBox(height: 4),
                         Wrap(
                           spacing: 6,
@@ -236,7 +266,7 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
                                     ? 'সকাল (${shortDate(addDays(dates[i], 1))})'
                                     : kCycleNames[j]),
                                 selected: sel[i][j],
-                                onSelected: locked[i][j]
+                                onSelected: ate[i][j]
                                     ? null
                                     : (v) =>
                                         setDialogState(() => sel[i][j] = v),
@@ -247,9 +277,18 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
                     ),
                   ),
                 const SizedBox(height: 8),
-                Text('নতুন যোগ: ৳ ${bnDigits('$total')}',
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold)),
+                Text(
+                  net > 0
+                      ? 'নতুন যোগ: ৳ ${bnDigits('$net')}'
+                      : (net < 0
+                          ? 'ফেরত যাবে: ৳ ${bnDigits('${-net}')}'
+                          : 'কোনো পরিবর্তন নেই'),
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: net < 0 ? Colors.green : null,
+                  ),
+                ),
               ],
             ),
           ),
@@ -259,33 +298,37 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
               child: const Text('বাতিল'),
             ),
             ElevatedButton(
-              onPressed: () {
-                if (newSlots == 0) return;
-                // শিক্ষার্থী শুধু অনুমতি থাকলেই মিল চালু করতে পারবে
-                if (self && !extra.mealOpen) {
-                  Navigator.pop(ctx);
-                  messengerKey.currentState?.showSnackBar(const SnackBar(
-                      content: Text('এখন মিল চালুর অনুমতি বন্ধ আছে')));
-                  return;
-                }
-                final updated = Map<String, String>.from(meals);
-                for (int i = 0; i < kMealDays; i++) {
-                  final str = xStr(sel[i]);
-                  final key = isoOf(dates[i]);
-                  if (str.isEmpty) {
-                    updated.remove(key);
-                  } else {
-                    updated[key] = str;
-                  }
-                }
-                student['pc'] = numOf(student['pc']) + total;
-                student['slots'] =
-                    ((student['slots'] as num?)?.toInt() ?? 0) + newSlots;
-                student['meals'] = updated;
-                data.saveStudent(student);
-                Navigator.pop(ctx);
-              },
-              child: const Text('চালু করুন'),
+              onPressed: !changed
+                  ? null
+                  : () {
+                      // শিক্ষার্থী শুধু অনুমতি থাকলেই বদলাতে পারবে
+                      if (self && !extra.mealOpen) {
+                        Navigator.pop(ctx);
+                        messengerKey.currentState?.showSnackBar(const SnackBar(
+                            content: Text('এখন মিল বদলানোর অনুমতি বন্ধ আছে')));
+                        return;
+                      }
+                      final updated = Map<String, String>.from(meals);
+                      for (int i = 0; i < kMealDays; i++) {
+                        final str = xStr(sel[i]);
+                        final key = isoOf(dates[i]);
+                        if (str.isEmpty) {
+                          updated.remove(key);
+                        } else {
+                          updated[key] = str;
+                        }
+                      }
+                      student['pc'] = numOf(student['pc']) + net;
+                      int slots =
+                          ((student['slots'] as num?)?.toInt() ?? 0) +
+                              slotDelta;
+                      if (slots < 0) slots = 0;
+                      student['slots'] = slots;
+                      student['meals'] = updated;
+                      data.saveStudent(student);
+                      Navigator.pop(ctx);
+                    },
+              child: const Text('সেভ করুন'),
             ),
           ],
         );
@@ -294,6 +337,9 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
   );
 }
 
+// ---------------------------------------------------------------
+// শিক্ষার্থীর পিন পরিবর্তন
+// ---------------------------------------------------------------
 void showStudentPinDialog(BuildContext context, Map<String, dynamic> s) {
   final curC = TextEditingController();
   final newC = TextEditingController();
@@ -476,7 +522,11 @@ class _LoginScreen2State extends State<LoginScreen2> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        if (data.hallId == null) return const HallPickerScreen();
+        return Scaffold(
       backgroundColor: bgC(context),
       body: SafeArea(
         child: Center(
@@ -502,6 +552,34 @@ class _LoginScreen2State extends State<LoginScreen2> {
                           color: inkC(context))),
                   Text('হোস্টেল মিলের হিসাব, এক জায়গায়',
                       style: TextStyle(color: mutC(context))),
+                  const SizedBox(height: 14),
+                  InkWell(
+                    borderRadius: BorderRadius.circular(99),
+                    onTap: () => leaveToPicker(context),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: tintC(context),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.apartment, size: 16, color: priC(context)),
+                          const SizedBox(width: 6),
+                          Text(data.hallName.isEmpty ? 'হল' : data.hallName,
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: priC(context))),
+                          const SizedBox(width: 6),
+                          Text('· বদলান',
+                              style: TextStyle(
+                                  fontSize: 12, color: mutC(context))),
+                        ],
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 28),
                   segControl(
                     context,
@@ -591,6 +669,8 @@ class _LoginScreen2State extends State<LoginScreen2> {
           ),
         ),
       ),
+    );
+      },
     );
   }
 }
