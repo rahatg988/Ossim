@@ -26,6 +26,28 @@ class ExtraData extends ChangeNotifier {
   int seenOpenAt = 0; // এই ফোন যেটা শেষ দেখেছে
   bool isManager = false;
 
+  // খাবারের মূল্য তালিকা (ম্যানেজার বদলাতে পারবে) ও হিসাবের মেয়াদ
+  static const Map<String, int> kDefaultPrices = {
+    'b': 15,
+    'l': 35,
+    'd': 30,
+    'bl': 50,
+    'bd': 45,
+    'ld': 60,
+    'bld': 70,
+  };
+  static const List<List<String>> kPriceNames = [
+    ['b', 'শুধু সকাল'],
+    ['l', 'শুধু দুপুর'],
+    ['d', 'শুধু রাত'],
+    ['ld', 'দুপুর + রাত'],
+    ['bl', 'সকাল + দুপুর'],
+    ['bd', 'সকাল + রাত'],
+    ['bld', 'সকাল + দুপুর + রাত (পুরো দিন)'],
+  ];
+  Map<String, int> prices = Map<String, int>.from(kDefaultPrices);
+  int periodDays = 4;
+
   DocumentReference<Map<String, dynamic>> get _doc =>
       FirebaseFirestore.instance.collection('config').doc('extra');
 
@@ -39,6 +61,15 @@ class ExtraData extends ChangeNotifier {
       final m = d.data() ?? <String, dynamic>{};
       mealOpen = m['mealOpen'] == true;
       openAt = (m['openAt'] as num?)?.toInt() ?? 0;
+      final pr = m['prices'];
+      if (pr is Map) {
+        for (final k in kDefaultPrices.keys) {
+          final v = pr[k];
+          if (v is num) prices[k] = v.toInt();
+        }
+      }
+      final pdv = (m['periodDays'] as num?)?.toInt();
+      if (pdv != null && pdv >= 1 && pdv <= 7) periodDays = pdv;
       // নতুন অনুমতি এলে একবার ভাইব্রেট + বার্তা (ম্যানেজারের ফোনে নয়)
       if (mealOpen && openAt > seenOpenAt) {
         seenOpenAt = openAt;
@@ -57,6 +88,30 @@ class ExtraData extends ChangeNotifier {
       }
       notifyListeners();
     }, onError: (e) {});
+  }
+
+  void setPrice(String k, int v) {
+    prices[k] = v;
+    notifyListeners();
+    _doc
+        .set({'prices': prices}, SetOptions(merge: true))
+        .catchError((e) {});
+  }
+
+  void resetPrices() {
+    prices = Map<String, int>.from(kDefaultPrices);
+    notifyListeners();
+    _doc
+        .set({'prices': prices}, SetOptions(merge: true))
+        .catchError((e) {});
+  }
+
+  void setPeriodDays(int n) {
+    periodDays = n;
+    notifyListeners();
+    _doc
+        .set({'periodDays': n}, SetOptions(merge: true))
+        .catchError((e) {});
   }
 
   void setOpen(bool v) {
@@ -111,13 +166,22 @@ Widget mealPermCard() {
               },
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              padding: const EdgeInsets.fromLTRB(16, 0, 8, 8),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('মিল চালু করেছে'),
-                  Text('${bnDigits('$on')} জন / মোট ${bnDigits('$total')} জন',
-                      style: const TextStyle(fontWeight: FontWeight.bold)),
+                  Expanded(
+                    child: Text(
+                        'মিল চালু: ${bnDigits('$on')} জন / মোট ${bnDigits('$total')} জন',
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const SheetScreen()),
+                    ),
+                    icon: const Icon(Icons.table_chart, size: 18),
+                    label: const Text('টেবিল (এক্সেল)'),
+                  ),
                 ],
               ),
             ),
@@ -131,19 +195,13 @@ Widget mealPermCard() {
 // ---------------------------------------------------------------
 // মিল চালুর ডায়ালগ (ম্যানেজার ও শিক্ষার্থী দুজনেই ব্যবহার করবে)
 // ---------------------------------------------------------------
-const int kMealDays = 4;
+int get kMealDays => extra.periodDays;
 
 int xPrice(List<bool> f) {
   // f = [দুপুর, রাত, সকাল]
-  final l = f[0], d = f[1], b = f[2];
-  if (b && l && d) return 70;
-  if (b && l) return 50;
-  if (b && d) return 45;
-  if (l && d) return 60;
-  if (b) return 15;
-  if (l) return 35;
-  if (d) return 30;
-  return 0;
+  final key = (f[2] ? 'b' : '') + (f[0] ? 'l' : '') + (f[1] ? 'd' : '');
+  if (key.isEmpty) return 0;
+  return extra.prices[key] ?? 0;
 }
 
 List<bool> xFlags(String? v) {
@@ -750,7 +808,7 @@ class _AttendanceScreen2State extends State<AttendanceScreen2> {
     final ateCount = on.where(_ate).length;
     final remaining = on.length - ateCount;
     final canPrev = cycle.isAfter(addDays(today, -1));
-    final canNext = cycle.isBefore(addDays(today, 3));
+    final canNext = cycle.isBefore(addDays(today, extra.periodDays - 1));
     final mealDate = slot == 2 ? addDays(cycle, 1) : cycle;
     final timeKey = ['l', 'd', 'b'][slot];
 
@@ -900,4 +958,521 @@ class _AttendanceScreen2State extends State<AttendanceScreen2> {
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------
+// এক্সেল স্টাইল টেবিল (ম্যানেজার)
+// নীল ঘরে ট্যাপ করলে অপশন আসবে: বর্ষ, রুম, মিল
+// ---------------------------------------------------------------
+class SheetScreen extends StatefulWidget {
+  const SheetScreen({super.key});
+
+  @override
+  State<SheetScreen> createState() => _SheetScreenState();
+}
+
+class _SheetScreenState extends State<SheetScreen> {
+  int sortCol = 0;
+  bool asc = true;
+
+  Comparable _val(Map<String, dynamic> s, int c) {
+    switch (c) {
+      case 0:
+        return (s['id'] as num).toInt();
+      case 1:
+        return s['name'].toString();
+      case 2:
+        return s['year'].toString();
+      case 3:
+        return s['room'].toString();
+      case 4:
+        return numOf(s['op']);
+      case 5:
+        return numOf(s['pd']);
+      case 6:
+        return numOf(s['pc']);
+      case 7:
+        return balOf(s);
+      default:
+        return activeDays(s);
+    }
+  }
+
+  // বর্ষ বদলানো
+  Future<void> _editYear(Map<String, dynamic> s) async {
+    final v = await pickOption(context, '${s['name']} - বর্ষ বেছে নিন', kYears);
+    if (v == null) return;
+    s['year'] = v;
+    data.saveStudent(s);
+  }
+
+  // রুম বদলানো
+  Future<void> _editRoom(Map<String, dynamic> s) async {
+    final rooms = <String>{};
+    for (final x in data.students) {
+      final r = x['room'].toString();
+      if (r.isNotEmpty) rooms.add(r);
+    }
+    final list = rooms.toList()..sort();
+    const other = 'নতুন নম্বর লিখুন…';
+    final v = await pickOption(
+        context, '${s['name']} - রুম বেছে নিন', [...list, other]);
+    if (v == null || !mounted) return;
+    if (v != other) {
+      s['room'] = v;
+      data.saveStudent(s);
+      return;
+    }
+    final c = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('রুম নম্বর'),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'রুম নম্বর'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final t = c.text.trim();
+              if (t.isEmpty) return;
+              s['room'] = t;
+              data.saveStudent(s);
+              Navigator.pop(ctx);
+            },
+            child: const Text('সেভ করুন'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        final rows = List<Map<String, dynamic>>.from(data.students);
+        rows.sort((a, b) {
+          final r = _val(a, sortCol).compareTo(_val(b, sortCol));
+          return asc ? r : -r;
+        });
+
+        double tOp = 0, tPd = 0, tPc = 0, tBal = 0;
+        for (final s in rows) {
+          tOp += numOf(s['op']);
+          tPd += numOf(s['pd']);
+          tPc += numOf(s['pc']);
+          tBal += balOf(s);
+        }
+
+        DataColumn col(String t, {bool num = false}) => DataColumn(
+              label:
+                  Text(t, style: const TextStyle(fontWeight: FontWeight.bold)),
+              numeric: num,
+              onSort: (c, a) => setState(() {
+                sortCol = c;
+                asc = a;
+              }),
+            );
+
+        DataCell cell(String t, {Color? color, bool bold = false}) => DataCell(
+              Text(t,
+                  style: TextStyle(
+                      color: color,
+                      fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+            );
+
+        // ট্যাপ করার ঘর (নীল)
+        DataCell tapCell(String t, VoidCallback onTap) => DataCell(
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(t, style: const TextStyle(color: Colors.blue)),
+                    const Icon(Icons.arrow_drop_down,
+                        size: 18, color: Colors.blue),
+                  ],
+                ),
+              ),
+              onTap: onTap,
+            );
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('শিক্ষার্থীদের তালিকা (টেবিল)'),
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+          ),
+          body: rows.isEmpty
+              ? const Center(child: Text('কোনো স্টুডেন্ট নেই।'))
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Text(
+                          'নীল ঘরে ট্যাপ করলে অপশন আসবে (বর্ষ, রুম, মিল)। হেডারে ট্যাপ করলে সর্ট হবে।',
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.vertical,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: DataTable(
+                            sortColumnIndex: sortCol,
+                            sortAscending: asc,
+                            columnSpacing: 18,
+                            headingRowHeight: 44,
+                            dataRowMinHeight: 44,
+                            dataRowMaxHeight: 44,
+                            headingRowColor:
+                                WidgetStatePropertyAll(Colors.teal.shade100),
+                            border:
+                                TableBorder.all(color: Colors.grey.shade400),
+                            columns: [
+                              col('নং', num: true),
+                              col('নাম'),
+                              col('বর্ষ'),
+                              col('রুম'),
+                              col('শুরুর', num: true),
+                              col('জমা', num: true),
+                              col('খরচ', num: true),
+                              col('পাওনা/বকেয়া', num: true),
+                              col('মিল', num: true),
+                            ],
+                            rows: [
+                              for (final s in rows)
+                                DataRow(cells: [
+                                  cell(bnDigits('${s['id']}')),
+                                  cell(s['name'].toString(), bold: true),
+                                  tapCell(s['year'].toString(),
+                                      () => _editYear(s)),
+                                  tapCell(bnDigits(s['room'].toString()),
+                                      () => _editRoom(s)),
+                                  cell(money(numOf(s['op']))),
+                                  cell(money(numOf(s['pd']))),
+                                  cell(money(numOf(s['pc']))),
+                                  cell(
+                                    money(balOf(s)),
+                                    color: balOf(s) >= 0
+                                        ? Colors.green
+                                        : Colors.red,
+                                    bold: true,
+                                  ),
+                                  tapCell(
+                                    activeDays(s) > 0
+                                        ? '${bnDigits('${activeDays(s)}')} দিন'
+                                        : (activeLines(s).isNotEmpty
+                                            ? 'চালু'
+                                            : 'বন্ধ'),
+                                    () => showMealDialog(context, s),
+                                  ),
+                                ]),
+                              // সর্বমোট সারি
+                              DataRow(
+                                color: WidgetStatePropertyAll(
+                                    Colors.amber.shade100),
+                                cells: [
+                                  cell(''),
+                                  cell('সর্বমোট', color: Colors.black87, bold: true),
+                                  cell(''),
+                                  cell(''),
+                                  cell(money(tOp),
+                                      color: Colors.black87, bold: true),
+                                  cell(money(tPd),
+                                      color: Colors.black87, bold: true),
+                                  cell(money(tPc),
+                                      color: Colors.black87, bold: true),
+                                  cell(money(tBal),
+                                      color: Colors.black87, bold: true),
+                                  cell(''),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// মূল্য তালিকা ও হিসাবের মেয়াদ
+// ---------------------------------------------------------------
+
+// শিক্ষার্থী ও সবার জন্য মূল্য তালিকা (main.dart-এর priceCard-এর বদলে)
+Widget priceCard() {
+  return ListenableBuilder(
+    listenable: extra,
+    builder: (context, _) => Card(
+      child: Column(
+        children: [
+          for (int i = 0; i < ExtraData.kPriceNames.length; i++) ...[
+            if (i > 0) const Divider(height: 1),
+            ListTile(
+              dense: true,
+              title: Text(ExtraData.kPriceNames[i][1]),
+              trailing: Text(
+                '৳ ${bnDigits('${extra.prices[ExtraData.kPriceNames[i][0]]}')}',
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
+// সেটিংসে: ম্যানেজার দাম বদলাতে পারবে
+Widget priceSettingsCard(BuildContext context) {
+  return ListenableBuilder(
+    listenable: extra,
+    builder: (context, _) => Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Card(
+          child: Column(
+            children: [
+              for (int i = 0; i < ExtraData.kPriceNames.length; i++) ...[
+                if (i > 0) const Divider(height: 1),
+                ListTile(
+                  dense: true,
+                  title: Text(ExtraData.kPriceNames[i][1]),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '৳ ${bnDigits('${extra.prices[ExtraData.kPriceNames[i][0]]}')}',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 15),
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(Icons.edit, size: 16),
+                    ],
+                  ),
+                  onTap: () => _editPriceDialog(context, ExtraData.kPriceNames[i]),
+                ),
+              ],
+            ],
+          ),
+        ),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'বদলাতে সারিতে ট্যাপ করুন। নতুন দাম শুধু এরপর যোগ হওয়া মিলে লাগবে, আগে যোগ করা মিলের খরচ বদলাবে না।',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+            TextButton(
+              onPressed: extra.resetPrices,
+              child: const Text('ডিফল্ট দামে ফিরুন'),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+void _editPriceDialog(BuildContext context, List<String> item) {
+  final c = TextEditingController(text: '${extra.prices[item[0]]}');
+  String err = '';
+  showDialog(
+    context: context,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: Text(item[1]),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: c,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'নতুন দাম (৳)'),
+            ),
+            if (err.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(err,
+                    style: const TextStyle(color: Colors.red, fontSize: 12)),
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final v = int.tryParse(normSearch(c.text));
+              if (v == null || v < 0) {
+                setD(() => err = 'সঠিক দাম লিখুন');
+                return;
+              }
+              extra.setPrice(item[0], v);
+              Navigator.pop(ctx);
+            },
+            child: const Text('সেভ করুন'),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+// সেটিংসে: হিসাবের মেয়াদ (২, ৩ বা ৪ দিন)
+Widget periodSettingsCard() {
+  return ListenableBuilder(
+    listenable: extra,
+    builder: (context, _) => Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('কত দিন পরপর হিসাব শেষ করে নতুন হিসাব শুরু হবে',
+                style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final n in [2, 3, 4])
+                  ChoiceChip(
+                    label: Text('${bnDigits('$n')} দিন'),
+                    selected: extra.periodDays == n,
+                    onSelected: (_) => extra.setPeriodDays(n),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'মিল চালুর সময় আজ থেকে পরের ${bnDigits('${extra.periodDays}')} দিনের বেলা বাছা যাবে।',
+              style: const TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+// ম্যানেজারের হোমে: চলমান হিসাবের কার্ড (মেয়াদ বদলালে নিজে থেকে মানবে)
+Widget periodCardX(BuildContext context) {
+  return ListenableBuilder(
+    listenable: Listenable.merge([extra, data]),
+    builder: (context, _) {
+      final days = extra.periodDays;
+      final start = DateTime.parse(data.periodStart);
+      final end = addDays(start, days - 1);
+      final today = todayDate();
+      final over = today.isAfter(end);
+      int dn = today.difference(start).inDays + 1;
+      if (dn < 1) dn = 1;
+      if (dn > days) dn = days;
+
+      return Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+              color: over ? Colors.orange.shade800 : Colors.transparent),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('চলমান ${bnDigits('$days')} দিনের হিসাব',
+                            style:
+                                const TextStyle(fontWeight: FontWeight.bold)),
+                        Text(
+                          '${shortDate(start)} – ${shortDate(end)} | ${over ? '${bnDigits('$days')} দিন পূর্ণ' : 'দিন ${bnDigits('$dn')}/${bnDigits('$days')}'}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange.shade800,
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: () => _confirmNewPeriodX(context),
+                    child: const Text('নতুন হিসাব শুরু'),
+                  ),
+                ],
+              ),
+              if (over)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '${bnDigits('$days')} দিন পূর্ণ হয়েছে। নতুন হিসাব শুরু করুন।',
+                    style: TextStyle(
+                        fontSize: 12, color: Colors.orange.shade900),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
+
+void _confirmNewPeriodX(BuildContext context) {
+  final days = extra.periodDays;
+  final start = DateTime.parse(data.periodStart);
+  final end = addDays(start, days - 1);
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text('নতুন ${bnDigits('$days')} দিনের হিসাব শুরু করবেন?'),
+      content: Text(
+        'চলমান হিসাব (${shortDate(start)} – ${shortDate(end)}) সবার ইতিহাসে জমা হবে। প্রত্যেকের বর্তমান পাওনা বা বকেয়া নতুন হিসাবের শুরুর ব্যালেন্স হিসেবে যাবে। মিল চালু থাকা বেলাগুলো আগের মতোই থাকবে।',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('বাতিল'),
+        ),
+        ElevatedButton(
+          onPressed: () {
+            data.commitPeriod();
+            Navigator.pop(ctx);
+          },
+          child: const Text('হ্যাঁ, শুরু করুন'),
+        ),
+      ],
+    ),
+  );
 }
