@@ -193,6 +193,7 @@ Widget moreMenu(BuildContext context, {Map<String, dynamic>? student}) {
         if (v == 'pin' && student != null) {
           showStudentPinDialog(context, student);
         }
+        if (v == 'hall') leaveToPicker(context);
         if (v == 'out') goLogin(context);
       },
       itemBuilder: (_) => [
@@ -201,6 +202,7 @@ Widget moreMenu(BuildContext context, {Map<String, dynamic>? student}) {
             child: Text(isDark(context) ? 'লাইট মোড' : 'ডার্ক মোড')),
         if (student != null)
           const PopupMenuItem(value: 'pin', child: Text('পিন পরিবর্তন')),
+        const PopupMenuItem(value: 'hall', child: Text('হল বদলান')),
         const PopupMenuItem(value: 'out', child: Text('লগআউট')),
       ],
       child: Container(
@@ -846,7 +848,10 @@ Widget _priceBlock(BuildContext context) {
 // ---------------------------------------------------------------
 // হিসাবের ইতিহাস
 // ---------------------------------------------------------------
-PreferredSizeWidget plainBar(BuildContext context, String title) => AppBar(
+PreferredSizeWidget plainBar(BuildContext context, String title,
+        {List<Widget>? actions}) =>
+    AppBar(
+      actions: actions,
       title: Text(title,
           style: TextStyle(fontWeight: FontWeight.bold, color: inkC(context))),
       backgroundColor: bgC(context),
@@ -864,27 +869,37 @@ class HistoryScreen extends StatelessWidget {
     return ListenableBuilder(
       listenable: Listenable.merge([data, extra]),
       builder: (context, _) {
-        Map<String, dynamic>? student;
+        Map<String, dynamic>? found;
         for (final x in data.students) {
-          if (x['id'] == studentId) student = x;
+          if (x['id'] == studentId) found = x;
         }
-        if (student == null) {
+        if (found == null) {
           return Scaffold(
             backgroundColor: bgC(context),
             appBar: plainBar(context, 'হিসাবের ইতিহাস'),
             body: const Center(child: Text('তথ্য পাওয়া যায়নি।')),
           );
         }
-        final hist = (student['history'] as List)
+        final Map<String, dynamic> st = found;
+        final all = (st['history'] as List)
             .map((e) => Map<String, dynamic>.from(e as Map))
-            .toList()
-            .reversed
             .toList();
         final p = periodInfo();
 
         return Scaffold(
           backgroundColor: bgC(context),
-          appBar: plainBar(context, 'হিসাবের ইতিহাস'),
+          appBar: plainBar(context, 'হিসাবের ইতিহাস', actions: [
+            if (all.isNotEmpty)
+              TextButton(
+                onPressed: () => confirmDialog(
+                  context,
+                  'সব ইতিহাস মুছবেন?',
+                  'আপনার আগের সব হিসাব স্থায়ীভাবে মুছে যাবে। এটা ফেরত আনা যাবে না।',
+                  () => data.clearHistory(st),
+                ),
+                child: Text('সব মুছুন', style: TextStyle(color: badC(context))),
+              ),
+          ]),
           body: ListView(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
             children: [
@@ -905,43 +920,61 @@ class HistoryScreen extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    accountRows(numOf(student['op']), numOf(student['pd']),
-                        numOf(student['pc']), balOf(student)),
+                    accountRows(numOf(st['op']), numOf(st['pd']),
+                        numOf(st['pc']), balOf(st)),
                   ],
                 ),
               ),
-              sectionLabel(context, 'আগের হিসাব (${bnDigits('${hist.length}')}টি)'),
-              if (hist.isEmpty)
+              sectionLabel(
+                  context, 'আগের হিসাব (${bnDigits('${all.length}')}টি)'),
+              if (all.isEmpty)
                 Padding(
                   padding: const EdgeInsets.all(24),
                   child: Center(
                       child: Text('এখনও কোনো আগের হিসাব নেই।',
                           style: TextStyle(color: mutC(context)))),
                 ),
-              for (final h in hist)
+              for (int i = all.length - 1; i >= 0; i--)
                 AppCard(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 6, 12),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(
-                            '${shortDate(DateTime.parse(h['from'] as String))} – ${shortDate(DateTime.parse(h['to'] as String))}',
-                            style: TextStyle(
-                                fontWeight: FontWeight.w600,
-                                color: inkC(context)),
+                          Expanded(
+                            child: Text(
+                              '${shortDate(DateTime.parse(all[i]['from'] as String))} – ${shortDate(DateTime.parse(all[i]['to'] as String))}',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  color: inkC(context)),
+                            ),
                           ),
                           Text(
-                            'বেলা ${bnDigits('${h['slots'] ?? 0}')} | খেয়েছে ${bnDigits('${h['ate'] ?? 0}')}',
-                            style: TextStyle(
-                                fontSize: 12, color: mutC(context)),
+                            'বেলা ${bnDigits('${all[i]['slots'] ?? 0}')} | খেয়েছে ${bnDigits('${all[i]['ate'] ?? 0}')}',
+                            style:
+                                TextStyle(fontSize: 12, color: mutC(context)),
+                          ),
+                          IconButton(
+                            icon: Icon(Icons.delete_outline,
+                                color: badC(context)),
+                            onPressed: () => confirmDialog(
+                              context,
+                              'এই হিসাব মুছবেন?',
+                              'এই হিসাবটি স্থায়ীভাবে মুছে যাবে। এটা ফেরত আনা যাবে না।',
+                              () => data.deleteHistory(st, i),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 8),
-                      accountRows(numOf(h['op']), numOf(h['pd']),
-                          numOf(h['pc']), numOf(h['cl'])),
+                      Padding(
+                        padding: const EdgeInsets.only(right: 10),
+                        child: accountRows(
+                            numOf(all[i]['op']),
+                            numOf(all[i]['pd']),
+                            numOf(all[i]['pc']),
+                            numOf(all[i]['cl'])),
+                      ),
                     ],
                   ),
                 ),
@@ -1174,6 +1207,12 @@ class _DashboardTab extends StatelessWidget {
           }
         }
         final p = periodInfo();
+        double depSum = 0;
+        double costSum = 0;
+        for (final s in st) {
+          depSum += numOf(s['pd']);
+          costSum += numOf(s['pc']);
+        }
 
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
@@ -1309,6 +1348,13 @@ class _DashboardTab extends StatelessWidget {
                   const SizedBox(height: 12),
                   segBar(p.days, p.over ? p.days : p.dn, priC(context),
                       lnC(context)),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      'এ পর্যন্ত: ${bnDigits('$onCount')} জন মিল চালু · জমা ${money(depSum)} · খরচ ${money(costSum)}',
+                      style: TextStyle(fontSize: 12, color: mutC(context)),
+                    ),
+                  ),
                   if (p.over)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
@@ -1913,6 +1959,20 @@ class _SettingsTab extends StatelessWidget {
                 ],
               ),
             ),
+            sectionLabel(context, 'হল ও ইতিহাস'),
+            _group(context, [
+              _row(context, data.hallName.isEmpty ? 'হল' : data.hallName,
+                  value: 'বর্তমান হল'),
+              _row(context, 'ইতিহাস (মোট হিসাব)',
+                  value: '${bnDigits('${data.periods.length}')}টি',
+                  onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => const PeriodHistoryScreen()),
+                      )),
+              _row(context, 'হল বদলান',
+                  onTap: () => leaveToPicker(context), last: true),
+            ]),
             sectionLabel(context, 'অ্যাপ'),
             _group(context, [
               _row(context, 'ডার্ক মোড',
@@ -2016,6 +2076,7 @@ void showAddStudentDialog(BuildContext context) {
               };
               data.students.add(s);
               data.saveStudent(s);
+              if (deposit > 0) data.bumpDeposit(deposit);
               Navigator.pop(ctx);
             },
             child: const Text('যোগ করুন'),
@@ -2047,8 +2108,7 @@ void showDepositDialog(BuildContext context, Map<String, dynamic> student) {
           onPressed: () {
             final amount = double.tryParse(normSearch(amountC.text)) ?? 0.0;
             if (amount <= 0) return;
-            student['pd'] = numOf(student['pd']) + amount;
-            data.saveStudent(student);
+            data.addDeposit(student, amount);
             Navigator.pop(ctx);
           },
           child: const Text('জমা দিন'),
@@ -2088,7 +2148,7 @@ void confirmNewPeriod(BuildContext context) {
     builder: (ctx) => AlertDialog(
       title: Text('নতুন ${bnDigits('${p.days}')} দিনের হিসাব শুরু করবেন?'),
       content: Text(
-        'চলমান হিসাব (${shortDate(p.start)} – ${shortDate(p.end)}) সবার ইতিহাসে জমা হবে। প্রত্যেকের বর্তমান পাওনা বা বকেয়া নতুন হিসাবের শুরুর ব্যালেন্স হিসেবে যাবে। মিল চালু থাকা বেলাগুলো আগের মতোই থাকবে।',
+        'চলমান হিসাব (${shortDate(p.start)} – ${shortDate(p.end)}) ইতিহাসে জমা হবে: কতজন মিল চালু করেছে আর কত টাকা উঠেছে, তার মোট হিসাব ম্যানেজারের ইতিহাসে, আর প্রত্যেকের নিজের হিসাব তার নিজের ইতিহাসে।\n\nনতুন হিসাবে সবার মিল বন্ধ হয়ে যাবে (যে বেলা খাওয়া হয়নি তার টাকা ফেরত যাবে), আর মিলের খরচ ও পাওনা/বকেয়া সব ৳০ থেকে শুরু হবে। আগে নগদ টাকা মিটিয়ে নিন।',
       ),
       actions: [
         TextButton(
@@ -2561,4 +2621,393 @@ class _StudentTableState extends State<StudentTable> {
       },
     );
   }
+}
+
+// ---------------------------------------------------------------
+// ছোট সাহায্যকারী: নিশ্চিতকরণ, হল বদলানো
+// ---------------------------------------------------------------
+void confirmDialog(
+    BuildContext context, String title, String text, VoidCallback onYes,
+    {String yes = 'হ্যাঁ, মুছুন'}) {
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: Text(text),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('না'),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+              backgroundColor: K.bad, foregroundColor: Colors.white),
+          onPressed: () {
+            Navigator.pop(ctx);
+            onYes();
+          },
+          child: Text(yes),
+        ),
+      ],
+    ),
+  );
+}
+
+Future<void> leaveToPicker(BuildContext context) async {
+  await data.leaveHall();
+  if (!context.mounted) return;
+  Navigator.pushAndRemoveUntil(
+    context,
+    MaterialPageRoute(builder: (_) => const HallPickerScreen()),
+    (r) => false,
+  );
+}
+
+// ---------------------------------------------------------------
+// ম্যানেজারের ইতিহাস: প্রতিটা হিসাবের মোট হিসাব (কতজন, কত টাকা)
+// ---------------------------------------------------------------
+class PeriodHistoryScreen extends StatelessWidget {
+  const PeriodHistoryScreen({super.key});
+
+  Widget _stat(BuildContext c, String value, String label, {Color? color}) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: tintC(c),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(value,
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: color ?? inkC(c))),
+            ),
+            Text(label, style: TextStyle(fontSize: 11, color: mutC(c))),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        final list = data.periods;
+        return Scaffold(
+          backgroundColor: bgC(context),
+          appBar: plainBar(context, 'ইতিহাস · মোট হিসাব', actions: [
+            if (list.isNotEmpty)
+              TextButton(
+                onPressed: () => confirmDialog(
+                  context,
+                  'সব ইতিহাস মুছবেন?',
+                  '${data.hallName}-এর আগের সব হিসাব স্থায়ীভাবে মুছে যাবে। শিক্ষার্থীদের নিজেদের ইতিহাস ঠিক থাকবে।',
+                  data.clearPeriods,
+                ),
+                child:
+                    Text('সব মুছুন', style: TextStyle(color: badC(context))),
+              ),
+          ]),
+          body: list.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Text(
+                      'এখনও কোনো সম্পন্ন হিসাব নেই।\nনতুন হিসাব শুরু করলে আগেরটা এখানে জমা হবে।',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: mutC(context)),
+                    ),
+                  ),
+                )
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                  children: [
+                    for (final e in list) _periodCard(context, e),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+
+  Widget _periodCard(BuildContext context, Map<String, dynamic> e) {
+    final from = DateTime.parse(e['from'].toString());
+    final to = DateTime.parse(e['to'].toString());
+    final dd = (e['dd'] as List? ?? const [])
+        .map((v) => (v as num).toDouble())
+        .toList();
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${shortDate(from)} – ${shortDate(to)} · ${bnDigits('${e['days'] ?? dd.length}')} দিন',
+                  style: TextStyle(
+                      fontWeight: FontWeight.w600, color: inkC(context)),
+                ),
+              ),
+              IconButton(
+                icon: Icon(Icons.delete_outline, color: badC(context)),
+                onPressed: () => confirmDialog(
+                  context,
+                  'এই হিসাব মুছবেন?',
+                  '${shortDate(from)} – ${shortDate(to)} এর হিসাব স্থায়ীভাবে মুছে যাবে। শিক্ষার্থীদের নিজেদের ইতিহাস ঠিক থাকবে।',
+                  () => data.deletePeriod(e['id'].toString()),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _stat(context, '${bnDigits('${e['students'] ?? 0}')} জন',
+                  'মিল চালু করেছে'),
+              const SizedBox(width: 8),
+              _stat(context, bnDigits('${e['slots'] ?? 0}'), 'মোট বেলা'),
+              const SizedBox(width: 8),
+              _stat(context, money(numOf(e['deposit'])), 'জমা উঠেছে',
+                  color: okC(context)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text('মিলের খরচ ${money(numOf(e['cost']))}',
+              style: TextStyle(fontSize: 13, color: mutC(context))),
+          if (dd.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              [
+                for (int i = 0; i < dd.length; i++)
+                  'দিন ${bnDigits('${i + 1}')}: ${money(dd[i])}'
+              ].join(' · '),
+              style: TextStyle(fontSize: 12, color: mutC(context)),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------
+// হল বাছা ও নতুন হল তৈরি
+// ---------------------------------------------------------------
+class HallPickerScreen extends StatefulWidget {
+  const HallPickerScreen({super.key});
+
+  @override
+  State<HallPickerScreen> createState() => _HallPickerScreenState();
+}
+
+class _HallPickerScreenState extends State<HallPickerScreen> {
+  String q = '';
+
+  Future<void> _pick(String id) async {
+    await data.selectHall(id);
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (_) => const LoginScreen2()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: data,
+      builder: (context, _) {
+        final nq = normSearch(q);
+        final list = data.halls
+            .where((h) =>
+                nq.isEmpty || normSearch(h['name'].toString()).contains(nq))
+            .toList();
+        return Scaffold(
+          backgroundColor: bgC(context),
+          body: SafeArea(
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+              children: [
+                pageHeader(context, 'আপনার হল বেছে নিন',
+                    sub: 'প্রতিটা হলের শিক্ষার্থী ও হিসাব আলাদা থাকে'),
+                searchField(
+                    context, 'হলের নাম দিয়ে খুঁজুন', (v) => setState(() => q = v)),
+                if (!data.hallsLoaded)
+                  const Padding(
+                    padding: EdgeInsets.all(28),
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                else if (list.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Center(
+                      child: Text(
+                        data.halls.isEmpty
+                            ? 'এখনও কোনো হল নেই।\nনিচের বাটনে নতুন হল তৈরি করুন।'
+                            : 'কোনো হল পাওয়া যায়নি।',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: mutC(context)),
+                      ),
+                    ),
+                  ),
+                for (final h in list)
+                  AppCard(
+                    onTap: () => _pick(h['id'].toString()),
+                    child: Row(
+                      children: [
+                        iconTile(context, Icons.apartment),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(h['name'].toString(),
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 16,
+                                  color: inkC(context))),
+                        ),
+                        Icon(Icons.chevron_right, color: mutC(context)),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 6),
+                OutlinedButton.icon(
+                  onPressed: () => showCreateHallDialog(context),
+                  icon: const Icon(Icons.add),
+                  label: const Text('নতুন হল তৈরি করুন (ম্যানেজারের জন্য)'),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(
+                    'আপনার হল তালিকায় না থাকলে ম্যানেজার নতুন হল তৈরি করে শিক্ষার্থী যোগ করবেন।',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 12, color: mutC(context)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+Future<void> showCreateHallDialog(BuildContext context) async {
+  final legacy = await data.legacyExists();
+  if (!context.mounted) return;
+  final nameC = TextEditingController();
+  final pinC = TextEditingController();
+  String err = '';
+  bool busy = false;
+  bool importLegacy = false;
+
+  showDialog(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setD) => AlertDialog(
+        title: const Text('নতুন হল তৈরি করুন'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'নিজের হলের শিক্ষার্থী ও হিসাব এখানে আলাদাভাবে তৈরি হবে।',
+                style: TextStyle(fontSize: 13),
+              ),
+              TextField(
+                controller: nameC,
+                decoration: const InputDecoration(labelText: 'হলের নাম'),
+              ),
+              TextField(
+                controller: pinC,
+                obscureText: true,
+                decoration: const InputDecoration(
+                    labelText: 'ম্যানেজার পিন (কমপক্ষে ৪ অক্ষর)'),
+              ),
+              if (legacy)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: importLegacy,
+                  onChanged: busy
+                      ? null
+                      : (v) => setD(() => importLegacy = v ?? false),
+                  title: const Text('আগের ডেটা এই হলে আনুন',
+                      style: TextStyle(fontSize: 14)),
+                  subtitle: const Text(
+                      'আগের শিক্ষার্থী, নোটিশ, দাম ও সময় কপি হবে',
+                      style: TextStyle(fontSize: 12)),
+                ),
+              if (err.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(err,
+                      style: const TextStyle(color: Colors.red, fontSize: 12)),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: busy ? null : () => Navigator.pop(ctx),
+            child: const Text('বাতিল'),
+          ),
+          ElevatedButton(
+            onPressed: busy
+                ? null
+                : () async {
+                    final name = nameC.text.trim();
+                    final pin = pinC.text.trim();
+                    if (name.isEmpty) {
+                      setD(() => err = 'হলের নাম লিখুন');
+                      return;
+                    }
+                    if (pin.length < 4) {
+                      setD(() => err = 'পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
+                      return;
+                    }
+                    setD(() {
+                      busy = true;
+                      err = '';
+                    });
+                    final id = await data.createHall(name, pin,
+                        importLegacy: importLegacy);
+                    if (id == null) {
+                      setD(() {
+                        busy = false;
+                        err = 'হল তৈরি করা যায়নি। ইন্টারনেট দেখে আবার চেষ্টা করুন';
+                      });
+                      return;
+                    }
+                    await data.selectHall(id);
+                    extra.isManager = true;
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    if (context.mounted) {
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const HomeScreen()),
+                        (r) => false,
+                      );
+                    }
+                  },
+            child: busy
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('হল তৈরি করুন'),
+          ),
+        ],
+      ),
+    ),
+  );
 }
