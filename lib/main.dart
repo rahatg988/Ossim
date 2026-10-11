@@ -56,7 +56,8 @@ const List<String> kYears = [
   "Master's",
 ];
 
-const int kPeriodDays = 4;
+// হিসাবের মেয়াদ (দিন): ম্যানেজার সেটিংস থেকে ২, ৩ বা ৪ করতে পারে
+int get kPeriodDays => extra.periodDays;
 
 // খাবারের সময়-সূচি: [শুরু, শেষ] মিনিটে (রাত ১২টা থেকে)
 // শেষের সময়গুলো আনুমানিক, ম্যানেজার সেটিংস থেকে বদলাবেন
@@ -349,7 +350,7 @@ class AppData extends ChangeNotifier {
     _fs.collection('notices').doc(id).delete().catchError(_err);
   }
 
-  // নতুন ৪ দিনের হিসাব: চলমান হিসাব ইতিহাসে জমা হয়
+  // নতুন হিসাব: চলমান হিসাব ইতিহাসে জমা হয়
   void commitPeriod() {
     final today = todayDate();
     final fromIso = periodStart;
@@ -442,6 +443,7 @@ int activeDays(Map<String, dynamic> s) {
 
 // ---------------------------------------------------------------
 // সবার জন্য ছোট উইজেট
+// (মূল্য তালিকা priceCard() এখন extras.dart-এ)
 // ---------------------------------------------------------------
 Widget noticeBanner({VoidCallback? onTap}) {
   final text = data.notices.isNotEmpty
@@ -503,34 +505,6 @@ Widget accountRows(double op, double pd, double pc, double cl) {
         bold: true,
       ),
     ],
-  );
-}
-
-Widget priceCard() {
-  Widget row(String title, String price) => ListTile(
-        dense: true,
-        title: Text(title),
-        trailing: Text(price,
-            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-      );
-  return Card(
-    child: Column(
-      children: [
-        row('শুধু সকাল', '৳ ১৫'),
-        const Divider(height: 1),
-        row('শুধু দুপুর', '৳ ৩৫'),
-        const Divider(height: 1),
-        row('শুধু রাত', '৳ ৩০'),
-        const Divider(height: 1),
-        row('দুপুর + রাত', '৳ ৬০'),
-        const Divider(height: 1),
-        row('সকাল + দুপুর', '৳ ৫০'),
-        const Divider(height: 1),
-        row('সকাল + রাত', '৳ ৪৫'),
-        const Divider(height: 1),
-        row('সকাল + দুপুর + রাত (পুরো দিন)', '৳ ৭০'),
-      ],
-    ),
   );
 }
 
@@ -598,203 +572,7 @@ class OssimApp extends StatelessWidget {
   }
 }
 
-// ---------------------------------------------------------------
-// লগইন: শিক্ষার্থী / ম্যানেজার
-// ---------------------------------------------------------------
-class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
-
-  @override
-  State<LoginScreen> createState() => _LoginScreenState();
-}
-
-class _LoginScreenState extends State<LoginScreen> {
-  bool manager = false;
-  bool busy = false;
-  final TextEditingController idC = TextEditingController();
-  final TextEditingController pinC = TextEditingController();
-  String error = '';
-
-  @override
-  void dispose() {
-    idC.dispose();
-    pinC.dispose();
-    super.dispose();
-  }
-
-  Future<void> _studentLogin() async {
-    final q = normSearch(idC.text);
-    if (q.isEmpty) {
-      setState(() => error = 'নাম বা নম্বর লিখুন');
-      return;
-    }
-    setState(() {
-      busy = true;
-      error = '';
-    });
-    final ok = await data.ensureLoaded();
-    if (!mounted) return;
-    setState(() => busy = false);
-    if (!ok) {
-      setState(() => error = data.failMessage());
-      return;
-    }
-    final students = data.students;
-    var found = students
-        .where((s) =>
-            s['id'].toString() == q || normSearch(s['name'].toString()) == q)
-        .toList();
-    if (found.isEmpty) {
-      found = students
-          .where((s) => normSearch(s['name'].toString()).contains(q))
-          .toList();
-    }
-    if (found.isEmpty) {
-      setState(() => error = 'কোনো শিক্ষার্থী পাওয়া যায়নি');
-      return;
-    }
-    if (found.length > 1) {
-      setState(() => error = 'একাধিক নাম মিলেছে, পুরো নাম বা নম্বর লিখুন');
-      return;
-    }
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(
-        builder: (_) => StudentScreen(studentId: found.first['id'] as int),
-      ),
-    );
-  }
-
-  Future<void> _managerLogin() async {
-    setState(() {
-      busy = true;
-      error = '';
-    });
-    final ok =
-        await data.ensureLoaded(needStudents: false, needConfig: true);
-    if (!mounted) return;
-    setState(() => busy = false);
-    if (!ok) {
-      setState(() => error = data.failMessage());
-      return;
-    }
-    if (pinC.text.trim() != data.managerPin) {
-      setState(() => error = 'পিন ভুল হয়েছে');
-      return;
-    }
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(Icons.rice_bowl, size: 72, color: Colors.teal),
-              const SizedBox(height: 8),
-              const Text(
-                'Ossim-এ স্বাগতম',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 20),
-              Wrap(
-                spacing: 8,
-                children: [
-                  ChoiceChip(
-                    label: const Text('শিক্ষার্থী লগইন'),
-                    selected: !manager,
-                    onSelected: (_) => setState(() {
-                      manager = false;
-                      error = '';
-                    }),
-                  ),
-                  ChoiceChip(
-                    label: const Text('ম্যানেজার লগইন'),
-                    selected: manager,
-                    onSelected: (_) => setState(() {
-                      manager = true;
-                      error = '';
-                    }),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              if (!manager) ...[
-                TextField(
-                  controller: idC,
-                  decoration: const InputDecoration(
-                    labelText: 'আপনার নাম বা নম্বর',
-                    prefixIcon: Icon(Icons.person),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'নাম বা স্টুডেন্ট নম্বর, যেকোনোটা লিখলেই হবে।',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ] else ...[
-                TextField(
-                  controller: pinC,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'ম্যানেজার পিন',
-                    prefixIcon: Icon(Icons.lock),
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'প্রথমবার ডিফল্ট পিন ১২৩৪। ঢুকে সেটিংস থেকে বদলে নিন।',
-                  style: TextStyle(fontSize: 12),
-                ),
-              ],
-              if (error.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(error,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.red, fontSize: 13)),
-                ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.teal,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  onPressed: busy
-                      ? null
-                      : (manager ? _managerLogin : _studentLogin),
-                  child: busy
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white),
-                        )
-                      : Text(
-                          manager ? 'ম্যানেজার হিসেবে ঢুকুন' : 'প্রবেশ করুন',
-                          style: const TextStyle(fontSize: 16),
-                        ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
+// লগইন স্ক্রিন (শিক্ষার্থী / ম্যানেজার) এখন extras.dart-এর LoginScreen2
 
 void goLogin(BuildContext context) {
   Navigator.pushAndRemoveUntil(
@@ -1222,125 +1000,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   String searchQuery = '';
 
-  static const int maxMealDays = 4;
-
   List<Map<String, dynamic>> get students => data.students;
-
-  int _price(bool b, bool l, bool d) {
-    if (b && l && d) return 70;
-    if (b && l) return 50;
-    if (b && d) return 45;
-    if (l && d) return 60;
-    if (b) return 15;
-    if (l) return 35;
-    if (d) return 30;
-    return 0;
-  }
-
-  // f = [দুপুর, রাত, সকাল]
-  int _priceOf(List<bool> f) => _price(f[2], f[0], f[1]);
-
-  List<bool> _flagsOf(String? v) {
-    final s = v ?? '';
-    return [s.contains('l'), s.contains('d'), s.contains('b')];
-  }
-
-  String _flagsToStr(List<bool> f) {
-    var r = '';
-    if (f[0]) r += 'l';
-    if (f[1]) r += 'd';
-    if (f[2]) r += 'b';
-    return r;
-  }
-
-  // ---- নতুন ৪ দিনের হিসাব ----
-  void _confirmNewPeriod() {
-    final start = DateTime.parse(data.periodStart);
-    final end = addDays(start, kPeriodDays - 1);
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('নতুন ৪ দিনের হিসাব শুরু করবেন?'),
-        content: Text(
-          'চলমান হিসাব (${shortDate(start)} – ${shortDate(end)}) সবার ইতিহাসে জমা হবে। প্রত্যেকের বর্তমান পাওনা বা বকেয়া নতুন হিসাবের শুরুর ব্যালেন্স হিসেবে যাবে। মিল চালু থাকা বেলাগুলো আগের মতোই থাকবে।',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('বাতিল'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              data.commitPeriod();
-              Navigator.pop(ctx);
-            },
-            child: const Text('হ্যাঁ, শুরু করুন'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _periodCard() {
-    final start = DateTime.parse(data.periodStart);
-    final end = addDays(start, kPeriodDays - 1);
-    final today = todayDate();
-    final over = today.isAfter(end);
-    int dn = today.difference(start).inDays + 1;
-    if (dn < 1) dn = 1;
-    if (dn > kPeriodDays) dn = kPeriodDays;
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-            color: over ? Colors.orange.shade800 : Colors.transparent),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('চলমান ৪ দিনের হিসাব',
-                          style: TextStyle(fontWeight: FontWeight.bold)),
-                      Text(
-                        '${shortDate(start)} – ${shortDate(end)} | ${over ? '৪ দিন পূর্ণ' : 'দিন ${bnDigits('$dn')}/৪'}',
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.orange.shade800,
-                    foregroundColor: Colors.white,
-                  ),
-                  onPressed: _confirmNewPeriod,
-                  child: const Text('নতুন হিসাব শুরু'),
-                ),
-              ],
-            ),
-            if (over)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  '৪ দিন পূর্ণ হয়েছে। নতুন হিসাব শুরু করুন।',
-                  style:
-                      TextStyle(fontSize: 12, color: Colors.orange.shade900),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
 
   // ---- স্টুডেন্ট যোগ ----
   void _showAddStudentDialog() {
@@ -1469,134 +1129,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _showMealDialog(Map<String, dynamic> student) {
-    final meals = mapOf(student['meals']);
-    final today = todayDate();
-    final dates = List.generate(maxMealDays, (i) => addDays(today, i));
-    final locked = dates.map((d) => _flagsOf(meals[isoOf(d)])).toList();
-    final sel = locked.map((f) => List<bool>.from(f)).toList();
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) {
-          int total = 0;
-          int newSlots = 0;
-          for (int i = 0; i < maxMealDays; i++) {
-            total += _priceOf(sel[i]) - _priceOf(locked[i]);
-            for (int j = 0; j < 3; j++) {
-              if (sel[i][j] && !locked[i][j]) newSlots++;
-            }
-          }
-
-          return AlertDialog(
-            title: Text('${student['name']} - মিল চালু করুন'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'মিলের একদিন শুরু হয় দুপুরে। পুরো একদিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল। ধূসর বেলা আগে থেকেই চালু।',
-                    style: TextStyle(fontSize: 13),
-                  ),
-                  const SizedBox(height: 8),
-                  for (int i = 0; i < maxMealDays; i++)
-                    Container(
-                      margin: const EdgeInsets.symmetric(vertical: 4),
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade400),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Expanded(
-                                child: Text(dateLabel(dates[i]),
-                                    style: const TextStyle(
-                                        fontWeight: FontWeight.bold)),
-                              ),
-                              GestureDetector(
-                                onTap: () => setDialogState(() {
-                                  for (int j = 0; j < 3; j++) {
-                                    sel[i][j] = true;
-                                  }
-                                }),
-                                child: const Text(
-                                  'পুরো দিন',
-                                  style: TextStyle(
-                                      color: Colors.teal, fontSize: 13),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Wrap(
-                            spacing: 6,
-                            children: [
-                              for (int j = 0; j < 3; j++)
-                                FilterChip(
-                                  label: Text(j == 2
-                                      ? 'সকাল (${shortDate(addDays(dates[i], 1))})'
-                                      : kCycleNames[j]),
-                                  selected: sel[i][j],
-                                  onSelected: locked[i][j]
-                                      ? null
-                                      : (v) => setDialogState(
-                                          () => sel[i][j] = v),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'নতুন যোগ: ৳ $total',
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('বাতিল'),
-              ),
-              ElevatedButton(
-                onPressed: () {
-                  if (newSlots == 0) return;
-                  final updated = Map<String, String>.from(meals);
-                  for (int i = 0; i < maxMealDays; i++) {
-                    final str = _flagsToStr(sel[i]);
-                    final key = isoOf(dates[i]);
-                    if (str.isEmpty) {
-                      updated.remove(key);
-                    } else {
-                      updated[key] = str;
-                    }
-                  }
-                  student['pc'] = numOf(student['pc']) + total;
-                  student['slots'] =
-                      ((student['slots'] as num?)?.toInt() ?? 0) + newSlots;
-                  student['meals'] = updated;
-                  data.saveStudent(student);
-                  Navigator.pop(ctx);
-                },
-                child: const Text('চালু করুন'),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
   void _confirmDelete(Map<String, dynamic> student) {
     showDialog(
       context: context,
@@ -1688,7 +1220,7 @@ class _HomeScreenState extends State<HomeScreen> {
             noticeBanner(onTap: _openNotices),
             const SizedBox(height: 10),
             mealPermCard(),
-            _periodCard(),
+            periodCardX(context),
             Row(
               children: [
                 Expanded(
@@ -1871,7 +1403,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                           foregroundColor: Colors.white,
                                         ),
                                         onPressed: () =>
-                                            _showMealDialog(student),
+                                            showMealDialog(context, student),
                                         icon: const Icon(Icons.restaurant),
                                         label: const Text('মিল যোগ'),
                                       ),
@@ -1892,221 +1424,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ---------------------------------------------------------------
-// খাবার চিহ্নিত করা (ম্যানেজার)
-// ---------------------------------------------------------------
-class AttendanceScreen extends StatefulWidget {
-  const AttendanceScreen({super.key});
-
-  @override
-  State<AttendanceScreen> createState() => _AttendanceScreenState();
-}
-
-class _AttendanceScreenState extends State<AttendanceScreen> {
-  late final DateTime today;
-  late DateTime cycle;
-  int slot = 0; // 0 = দুপুর, 1 = রাত, 2 = পরদিন সকাল
-
-  @override
-  void initState() {
-    super.initState();
-    today = todayDate();
-    final n = nowMinutes();
-    // সময়-সূচি অনুযায়ী এখন কোন বেলা চলছে তা নিজে থেকে বেছে নেওয়া হয়
-    if (n < data.schedule['l']![0]) {
-      cycle = addDays(today, -1);
-      slot = 2;
-    } else if (n < data.schedule['d']![0]) {
-      cycle = today;
-      slot = 0;
-    } else {
-      cycle = today;
-      slot = 1;
-    }
-  }
-
-  String get _key => isoOf(cycle);
-  String get _ch => kCycleKeys[slot];
-
-  bool _hasMeal(Map<String, dynamic> s) {
-    final v = mapOf(s['meals'])[_key] ?? '';
-    return v.contains(_ch);
-  }
-
-  bool _ate(Map<String, dynamic> s) {
-    final v = mapOf(s['eaten'])[_key] ?? '';
-    return v.contains(_ch);
-  }
-
-  void _setAte(Map<String, dynamic> s, bool value) {
-    final e = mapOf(s['eaten']);
-    var cur = e[_key] ?? '';
-    if (value) {
-      if (!cur.contains(_ch)) cur += _ch;
-    } else {
-      cur = cur.replaceAll(_ch, '');
-    }
-    if (cur.isEmpty) {
-      e.remove(_key);
-    } else {
-      e[_key] = cur;
-    }
-    s['eaten'] = e;
-    data.saveStudent(s);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: data,
-      builder: (context, _) => _buildScaffold(context),
-    );
-  }
-
-  Widget _buildScaffold(BuildContext context) {
-    final all = data.students;
-    final on = all.where(_hasMeal).toList();
-    final off = all.where((s) => !_hasMeal(s)).toList();
-    final ateCount = on.where(_ate).length;
-    final remaining = on.length - ateCount;
-    final canPrev = cycle.isAfter(addDays(today, -1));
-    final canNext = cycle.isBefore(addDays(today, 3));
-    final mealDate = slot == 2 ? addDays(cycle, 1) : cycle;
-    final timeKey = ['l', 'd', 'b'][slot];
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('খাবার চিহ্নিত করুন'),
-        backgroundColor: Colors.teal,
-        foregroundColor: Colors.white,
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 14),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text(
-                  'খেয়েছে: ${bnDigits('$ateCount')}',
-                  style: const TextStyle(fontSize: 12, color: Colors.white),
-                ),
-                Text(
-                  'বাকি: ${bnDigits('$remaining')}',
-                  style: TextStyle(fontSize: 12, color: Colors.amber.shade200),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.chevron_left),
-                  onPressed: canPrev
-                      ? () => setState(() => cycle = addDays(cycle, -1))
-                      : null,
-                ),
-                Expanded(
-                  child: Column(
-                    children: [
-                      Text(
-                        'মিল দিন: ${dateLabel(cycle)}',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      const Text(
-                        'দুপুর থেকে পরদিন সকাল পর্যন্ত',
-                        style: TextStyle(fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.chevron_right),
-                  onPressed: canNext
-                      ? () => setState(() => cycle = addDays(cycle, 1))
-                      : null,
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              children: [
-                for (int i = 0; i < 3; i++)
-                  ChoiceChip(
-                    label: Text(i == 2
-                        ? 'পরদিন সকাল (${shortDate(addDays(cycle, 1))})'
-                        : kCycleNames[i]),
-                    selected: slot == i,
-                    onSelected: (_) => setState(() => slot = i),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'খাবারের তারিখ: ${dateLabel(mealDate)}\nসময়: ${fmtRange(timeKey)}',
-              style: const TextStyle(fontSize: 12),
-            ),
-            if (on.isNotEmpty)
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () {
-                    for (final s in on) {
-                      _setAte(s, true);
-                    }
-                  },
-                  child: const Text('সবাইকে চিহ্নিত করুন'),
-                ),
-              ),
-            Expanded(
-              child: on.isEmpty
-                  ? const Center(
-                      child: Text('এই বেলায় কারও মিল চালু নেই।'),
-                    )
-                  : ListView(
-                      children: [
-                        for (final s in on)
-                          Card(
-                            child: CheckboxListTile(
-                              value: _ate(s),
-                              onChanged: (v) => _setAte(s, v ?? false),
-                              title: Text(
-                                s['name'].toString(),
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold),
-                              ),
-                              subtitle: Text('রুম: ${s['room']}'),
-                              secondary: CircleAvatar(
-                                backgroundColor: Colors.teal,
-                                foregroundColor: Colors.white,
-                                child: Text('${s['id']}'),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
-            ),
-            if (off.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  'এই বেলায় মিল বন্ধ: ${off.map((s) => s['name']).join(', ')}',
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+// খাবার চিহ্নিত করা (ম্যানেজার) এখন extras.dart-এর AttendanceScreen2
 
 // ---------------------------------------------------------------
 // সেটিংস (শুধু ম্যানেজার)
@@ -2373,12 +1691,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: 14),
           const Text('🍽️ খাবারের মূল্য তালিকা (প্রতি দিন)', style: heading),
           const SizedBox(height: 6),
-          priceCard(),
+          priceSettingsCard(context),
           const SizedBox(height: 8),
           const Text(
-            'মিলের একদিন শুরু হয় দুপুরে। পুরো দিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল। আজ থেকে পরের ৪ দিনের যেকোনো বেলা চালু করা যাবে।',
+            'মিলের একদিন শুরু হয় দুপুরে। পুরো দিন = ওই তারিখের দুপুর + রাত + পরদিন সকাল।',
             style: TextStyle(fontSize: 13),
           ),
+          const SizedBox(height: 22),
+          const Text('📅 হিসাবের মেয়াদ', style: heading),
+          const SizedBox(height: 6),
+          periodSettingsCard(),
           const SizedBox(height: 22),
           const Text('🔒 ম্যানেজার পিন', style: heading),
           const SizedBox(height: 4),
