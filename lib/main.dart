@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
@@ -49,7 +51,8 @@ const List<String> kCycleKeys = ['l', 'd', 'b'];
 const List<String> kCycleNames = ['দুপুর', 'রাত', 'সকাল'];
 
 const List<String> kYears = [
-  'HSC',
+  'HSC 1st year',
+  'HSC 2nd year',
   '1st year',
   '2nd year',
   '3rd year',
@@ -216,15 +219,24 @@ void normalizeStudent(Map<String, dynamic> s) {
 class AppData extends ChangeNotifier {
   List<Map<String, dynamic>> students = [];
   List<Map<String, dynamic>> notices = [];
+  List<Map<String, dynamic>> periods = []; // ম্যানেজারের মোট হিসাবের ইতিহাস
+  List<Map<String, dynamic>> halls = []; // সব হলের তালিকা {id, name}
   Map<String, List<int>> schedule = copyDefaultSchedule();
+  List<int> dd = List<int>.filled(7, 0); // চলমান হিসাবে দিনভিত্তিক জমা
+  String? hallId;
+  String hallName = '';
   String managerPin = '1234';
   String managerRoom = '';
   String periodStart = isoOf(todayDate());
 
   bool studentsLoaded = false;
   bool configLoaded = false;
+  bool hallsLoaded = false;
   bool dark = false; // শুধু এই ফোনের পছন্দ
   String lastError = ''; // অনলাইন সংযোগের শেষ সমস্যা
+
+  final List<StreamSubscription<dynamic>> _subs = [];
+  StreamSubscription<dynamic>? _hallsSub;
 
   void _err(Object e) {
     lastError = e.toString();
@@ -232,11 +244,69 @@ class AppData extends ChangeNotifier {
   }
 
   FirebaseFirestore get _fs => FirebaseFirestore.instance;
-  DocumentReference<Map<String, dynamic>> get _cfg =>
-      _fs.collection('config').doc('app');
+  DocumentReference<Map<String, dynamic>> get _hall =>
+      _fs.collection('halls').doc(hallId);
+  CollectionReference<Map<String, dynamic>> get _stuCol =>
+      _hall.collection('students');
 
-  void start() {
-    _fs.collection('students').snapshots().listen((snap) {
+  // ---- সব হলের তালিকা (হল বাছার স্ক্রিনের জন্য) ----
+  void startHallList() {
+    _hallsSub?.cancel();
+    _hallsSub = _fs.collection('halls').snapshots().listen((snap) {
+      halls = snap.docs
+          .map((d) => <String, dynamic>{
+                'id': d.id,
+                'name': (d.data()['name'] ?? '').toString(),
+              })
+          .toList();
+      halls.sort(
+          (a, b) => a['name'].toString().compareTo(b['name'].toString()));
+      hallsLoaded = true;
+      notifyListeners();
+    }, onError: _err);
+  }
+
+  // ---- হল বাছা / ছাড়া ----
+  Future<void> selectHall(String id) async {
+    _stopHall();
+    hallId = id;
+    final p = await SharedPreferences.getInstance();
+    await p.setString('hallId', id);
+    _startHall();
+    await extra.startFor(id);
+    notifyListeners();
+  }
+
+  Future<void> leaveHall() async {
+    _stopHall();
+    hallId = null;
+    final p = await SharedPreferences.getInstance();
+    await p.remove('hallId');
+    notifyListeners();
+  }
+
+  void _stopHall() {
+    for (final s in _subs) {
+      s.cancel();
+    }
+    _subs.clear();
+    students = [];
+    notices = [];
+    periods = [];
+    studentsLoaded = false;
+    configLoaded = false;
+    hallName = '';
+    managerPin = '1234';
+    managerRoom = '';
+    periodStart = isoOf(todayDate());
+    schedule = copyDefaultSchedule();
+    dd = List<int>.filled(7, 0);
+    lastError = '';
+    extra.reset();
+  }
+
+  void _startHall() {
+    _subs.add(_stuCol.snapshots().listen((snap) {
       final list = <Map<String, dynamic>>[];
       for (final d in snap.docs) {
         final s = Map<String, dynamic>.from(d.data());
@@ -251,22 +321,16 @@ class AppData extends ChangeNotifier {
         lastError = '';
       }
       notifyListeners();
-    }, onError: _err);
+    }, onError: _err));
 
-    _cfg.snapshots().listen((doc) {
+    _subs.add(_hall.snapshots().listen((doc) {
       if (!doc.exists) {
-        // একদম প্রথমবার: সার্ভারে সত্যিই কিছু না থাকলে ডিফল্ট বসানো হয়
-        if (!doc.metadata.isFromCache) {
-          _cfg.set({
-            'managerPin': managerPin,
-            'managerRoom': managerRoom,
-            'periodStart': periodStart,
-            'schedule': kDefaultSchedule,
-          }).catchError(_err);
-        }
+        // হলটা মুছে গেছে (বা নেই): হল বাছার স্ক্রিনে ফেরা
+        if (!doc.metadata.isFromCache) leaveHall();
         return;
       }
       final m = doc.data() ?? {};
+      hallName = (m['name'] ?? '').toString();
       managerPin = (m['managerPin'] ?? '1234').toString();
       managerRoom = (m['managerRoom'] ?? '').toString();
       periodStart = (m['periodStart'] ?? periodStart).toString();
@@ -279,19 +343,41 @@ class AppData extends ChangeNotifier {
           }
         }
       }
+      final d = m['dd'];
+      if (d is List) {
+        dd = List<int>.generate(
+            7, (i) => i < d.length ? (d[i] as num).toInt() : 0);
+      }
       configLoaded = true;
       lastError = '';
       notifyListeners();
-    }, onError: _err);
+    }, onError: _err));
 
-    _fs.collection('notices').orderBy('at').snapshots().listen((snap) {
+    _subs.add(_hall
+        .collection('notices')
+        .orderBy('at')
+        .snapshots()
+        .listen((snap) {
       notices = snap.docs.map((d) {
         final m = Map<String, dynamic>.from(d.data());
         m['id'] = d.id;
         return m;
       }).toList();
       notifyListeners();
-    }, onError: _err);
+    }, onError: _err));
+
+    _subs.add(_hall
+        .collection('periods')
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .listen((snap) {
+      periods = snap.docs.map((d) {
+        final m = Map<String, dynamic>.from(d.data());
+        m['id'] = d.id;
+        return m;
+      }).toList();
+      notifyListeners();
+    }, onError: _err));
   }
 
   Future<bool> ensureLoaded(
@@ -314,25 +400,91 @@ class AppData extends ChangeNotifier {
     return 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন';
   }
 
+  // ---- নতুন হল তৈরি ----
+  Future<bool> legacyExists() async {
+    try {
+      final d = await _fs.collection('config').doc('app').get();
+      return d.exists;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<String?> createHall(String name, String pin,
+      {bool importLegacy = false}) async {
+    try {
+      final ref = _fs.collection('halls').doc();
+      await ref.set({
+        'name': name,
+        'managerPin': pin,
+        'managerRoom': '',
+        'periodStart': isoOf(todayDate()),
+        'schedule': kDefaultSchedule,
+        'dd': List<int>.filled(7, 0),
+        'prices': ExtraData.kDefaultPrices,
+        'periodDays': 4,
+        'mealOpen': false,
+        'openAt': 0,
+        'createdAt': DateTime.now().toIso8601String(),
+      });
+      if (importLegacy) await _importLegacy(ref);
+      return ref.id;
+    } catch (e) {
+      _err(e);
+      return null;
+    }
+  }
+
+  // আগের (হল-ছাড়া) ডেটা নতুন হলে কপি করা
+  Future<void> _importLegacy(DocumentReference<Map<String, dynamic>> ref) async {
+    final cfg = await _fs.collection('config').doc('app').get();
+    final ex = await _fs.collection('config').doc('extra').get();
+    final upd = <String, dynamic>{};
+    final c = cfg.data() ?? {};
+    for (final k in ['managerRoom', 'periodStart', 'schedule']) {
+      if (c[k] != null) upd[k] = c[k];
+    }
+    final e = ex.data() ?? {};
+    for (final k in ['prices', 'periodDays']) {
+      if (e[k] != null) upd[k] = e[k];
+    }
+    if (upd.isNotEmpty) await ref.set(upd, SetOptions(merge: true));
+
+    WriteBatch b = _fs.batch();
+    int n = 0;
+    Future<void> put(String col, QueryDocumentSnapshot<Map<String, dynamic>> d) async {
+      b.set(ref.collection(col).doc(d.id), d.data());
+      n++;
+      if (n % 400 == 0) {
+        await b.commit();
+        b = _fs.batch();
+      }
+    }
+
+    for (final d in (await _fs.collection('students').get()).docs) {
+      await put('students', d);
+    }
+    for (final d in (await _fs.collection('notices').get()).docs) {
+      await put('notices', d);
+    }
+    await b.commit();
+  }
+
   // ---- লেখা (অনলাইনে না থাকলেও ফোনে জমে থাকে, নেট এলে সিঙ্ক হয়) ----
   void saveStudent(Map<String, dynamic> s) {
     notifyListeners();
-    _fs
-        .collection('students')
-        .doc('${s['id']}')
-        .set(s)
-        .catchError(_err);
+    _stuCol.doc('${s['id']}').set(s).catchError(_err);
   }
 
   void deleteStudent(Map<String, dynamic> s) {
     students.remove(s);
     notifyListeners();
-    _fs.collection('students').doc('${s['id']}').delete().catchError(_err);
+    _stuCol.doc('${s['id']}').delete().catchError(_err);
   }
 
   void saveConfig() {
     notifyListeners();
-    _cfg.set({
+    _hall.set({
       'managerPin': managerPin,
       'managerRoom': managerRoom,
       'periodStart': periodStart,
@@ -341,46 +493,134 @@ class AppData extends ChangeNotifier {
   }
 
   void addNotice(String text) {
-    _fs.collection('notices').add({
+    _hall.collection('notices').add({
       'text': text,
       'at': DateTime.now().toIso8601String(),
     }).then<void>((_) {}).catchError(_err);
   }
 
   void deleteNotice(String id) {
-    _fs.collection('notices').doc(id).delete().catchError(_err);
+    _hall.collection('notices').doc(id).delete().catchError(_err);
   }
 
-  // নতুন হিসাব: চলমান হিসাব ইতিহাসে জমা হয়
-  void commitPeriod() {
-    final today = todayDate();
-    final fromIso = periodStart;
-    final toIso = isoOf(today);
+  // ---- জমা (চলমান হিসাবের দিনভিত্তিক জমাও লেখা হয়) ----
+  void bumpDeposit(double amount) {
+    final idx = periodInfo().dn - 1;
+    if (idx < 0 || idx >= dd.length) return;
+    dd[idx] = dd[idx] + amount.round();
+    _hall.set({'dd': dd}, SetOptions(merge: true)).catchError(_err);
+  }
+
+  void addDeposit(Map<String, dynamic> s, double amount) {
+    s['pd'] = numOf(s['pd']) + amount;
+    bumpDeposit(amount);
+    saveStudent(s);
+  }
+
+  // ---- শিক্ষার্থীর নিজের ইতিহাস ----
+  void deleteHistory(Map<String, dynamic> s, int index) {
+    final h = (s['history'] as List)
+        .map((e) => Map<String, dynamic>.from(e as Map))
+        .toList();
+    if (index < 0 || index >= h.length) return;
+    h.removeAt(index);
+    s['history'] = h;
+    saveStudent(s);
+  }
+
+  void clearHistory(Map<String, dynamic> s) {
+    s['history'] = <Map<String, dynamic>>[];
+    saveStudent(s);
+  }
+
+  // ---- ম্যানেজারের মোট হিসাবের ইতিহাস ----
+  void deletePeriod(String id) {
+    _hall.collection('periods').doc(id).delete().catchError(_err);
+  }
+
+  void clearPeriods() {
     final batch = _fs.batch();
+    for (final p in periods) {
+      batch.delete(_hall.collection('periods').doc(p['id'].toString()));
+    }
+    batch.commit().catchError(_err);
+  }
+
+  // নতুন হিসাব: মিল, মিলের খরচ ও ব্যালেন্স সব ৳০ থেকে শুরু।
+  // চলমান হিসাব ইতিহাসে জমা হয় (শিক্ষার্থীর নিজের + ম্যানেজারের মোট হিসাব)।
+  void commitPeriod() {
+    final todayIso = isoOf(todayDate());
+    final fromIso = periodStart;
+    final days = extra.periodDays;
+    final batch = _fs.batch();
+    int stuCount = 0;
+    int slotTotal = 0;
+    double depTotal = 0;
+    double costTotal = 0;
+
     for (final s in students) {
-      final cl = balOf(s);
+      final meals = mapOf(s['meals']);
+      final eaten = mapOf(s['eaten']);
+      // আজ বা পরের দিনের যে বেলা খাওয়া হয়নি, তার টাকা ফেরত
+      double refund = 0;
+      int unused = 0;
+      meals.forEach((k, v) {
+        if (k.compareTo(todayIso) < 0 || v.isEmpty) return;
+        final e = eaten[k] ?? '';
+        final ate = v.split('').where((c) => e.contains(c)).join();
+        refund += xPrice(xFlags(v)) - xPrice(xFlags(ate));
+        unused += v.length - ate.length;
+      });
+      final pc = numOf(s['pc']) - refund;
+      final cl = numOf(s['op']) + numOf(s['pd']) - pc;
+      int slots = (s['slots'] as num?)?.toInt() ?? 0;
+      if (slots > 0) stuCount++;
+      slots = slots - unused;
+      if (slots < 0) slots = 0;
+
       final hist = (s['history'] as List)
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
       hist.add({
         'from': fromIso,
-        'to': toIso,
+        'to': todayIso,
         'op': numOf(s['op']),
         'pd': numOf(s['pd']),
-        'pc': numOf(s['pc']),
+        'pc': pc,
         'cl': cl,
-        'slots': s['slots'] ?? 0,
-        'ate': countEaten(s, fromIso, toIso),
+        'slots': slots,
+        'ate': countEaten(s, fromIso, todayIso),
       });
+
+      depTotal += numOf(s['pd']);
+      costTotal += pc;
+      slotTotal += slots;
+
       s['history'] = hist;
-      s['op'] = cl;
+      s['op'] = 0.0;
       s['pd'] = 0.0;
       s['pc'] = 0.0;
       s['slots'] = 0;
-      batch.set(_fs.collection('students').doc('${s['id']}'), s);
+      s['meals'] = <String, String>{};
+      s['eaten'] = <String, String>{};
+      batch.set(_stuCol.doc('${s['id']}'), s);
     }
-    periodStart = toIso;
-    batch.set(_cfg, {'periodStart': toIso}, SetOptions(merge: true));
+
+    batch.set(_hall.collection('periods').doc(), {
+      'from': fromIso,
+      'to': todayIso,
+      'days': days,
+      'students': stuCount,
+      'slots': slotTotal,
+      'deposit': depTotal,
+      'cost': costTotal,
+      'dd': dd.sublist(0, days),
+      'createdAt': DateTime.now().toIso8601String(),
+    });
+    dd = List<int>.filled(7, 0);
+    periodStart = todayIso;
+    batch.set(_hall, {'periodStart': todayIso, 'dd': dd},
+        SetOptions(merge: true));
     batch.commit().catchError(_err);
     notifyListeners();
   }
@@ -538,14 +778,17 @@ Future<void> main() async {
   await Firebase.initializeApp(options: kFirebaseOptions);
   final prefs = await SharedPreferences.getInstance();
   data.dark = prefs.getBool('dark') ?? false;
-  data.start();
-  await extra.init();
-  extra.start();
-  runApp(const OssimApp());
+  data.startHallList();
+  final saved = prefs.getString('hallId');
+  if (saved != null) await data.selectHall(saved);
+  runApp(OssimApp(
+    home: saved != null ? const LoginScreen2() : const HallPickerScreen(),
+  ));
 }
 
 class OssimApp extends StatelessWidget {
-  const OssimApp({super.key});
+  final Widget home;
+  const OssimApp({super.key, required this.home});
 
   @override
   Widget build(BuildContext context) {
@@ -568,7 +811,7 @@ class OssimApp extends StatelessWidget {
               seedColor: K.pri, brightness: Brightness.dark),
           scaffoldBackgroundColor: const Color(0xFF0C1513),
         ),
-        home: const LoginScreen2(),
+        home: home,
       ),
     );
   }
