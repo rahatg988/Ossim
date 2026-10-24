@@ -86,7 +86,7 @@ class ExtraData extends ChangeNotifier {
         }
       }
       final pdv = (m['periodDays'] as num?)?.toInt();
-      if (pdv != null && pdv >= 1 && pdv <= 7) periodDays = pdv;
+      if (pdv != null && pdv >= 1 && pdv <= 15) periodDays = pdv;
       // নতুন অনুমতি এলে একবার ভাইব্রেট + বার্তা (ম্যানেজারের ফোনে নয়)
       if (mealOpen && openAt > seenOpenAt) {
         seenOpenAt = openAt;
@@ -124,10 +124,10 @@ class ExtraData extends ChangeNotifier {
   }
 
   void setPeriodDays(int n) {
-    periodDays = n;
+    periodDays = n < 1 ? 1 : (n > 15 ? 15 : n);
     notifyListeners();
     _doc
-        .set({'periodDays': n}, SetOptions(merge: true))
+        .set({'periodDays': periodDays}, SetOptions(merge: true))
         .catchError((e) {});
   }
 
@@ -341,16 +341,22 @@ void showMealDialog(BuildContext context, Map<String, dynamic> student,
 // শিক্ষার্থীর পিন পরিবর্তন
 // ---------------------------------------------------------------
 void showStudentPinDialog(BuildContext context, Map<String, dynamic> s) {
+  showOwnPinDialog(context, 'পিন পরিবর্তন');
+}
+
+// নিজের পিন বদলানো (শিক্ষার্থী বা ম্যানেজার, দুজনের জন্যই)
+void showOwnPinDialog(BuildContext context, String title) {
   final curC = TextEditingController();
   final newC = TextEditingController();
   final confC = TextEditingController();
   String err = '';
+  bool busy = false;
 
   showDialog(
     context: context,
     builder: (ctx) => StatefulBuilder(
       builder: (ctx, setD) => AlertDialog(
-        title: const Text('পিন পরিবর্তন'),
+        title: Text(title),
         content: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -383,32 +389,53 @@ void showStudentPinDialog(BuildContext context, Map<String, dynamic> s) {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: busy ? null : () => Navigator.pop(ctx),
             child: const Text('বাতিল'),
           ),
           ElevatedButton(
-            onPressed: () {
-              final cur = (s['pin'] ?? '1234').toString();
-              if (curC.text.trim() != cur) {
-                setD(() => err = 'বর্তমান পিন ভুল');
-                return;
-              }
-              final np = newC.text.trim();
-              if (np.length < 4) {
-                setD(() => err = 'নতুন পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
-                return;
-              }
-              if (np != confC.text.trim()) {
-                setD(() => err = 'নতুন পিন মিলছে না');
-                return;
-              }
-              s['pin'] = np;
-              data.saveStudent(s);
-              Navigator.pop(ctx);
-              messengerKey.currentState?.showSnackBar(
-                  const SnackBar(content: Text('পিন বদলানো হয়েছে')));
-            },
-            child: const Text('বদলান'),
+            onPressed: busy
+                ? null
+                : () async {
+                    final np = newC.text.trim();
+                    if (np.length < 4) {
+                      setD(() => err = 'নতুন পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
+                      return;
+                    }
+                    if (np != confC.text.trim()) {
+                      setD(() => err = 'নতুন পিন মিলছে না');
+                      return;
+                    }
+                    setD(() {
+                      busy = true;
+                      err = '';
+                    });
+                    final ok = await data.verifyPin(curC.text.trim());
+                    if (!ok) {
+                      setD(() {
+                        busy = false;
+                        err = 'বর্তমান পিন ভুল';
+                      });
+                      return;
+                    }
+                    try {
+                      await data.changeOwnPin(np);
+                    } catch (_) {
+                      setD(() {
+                        busy = false;
+                        err = 'পিন বদলানো যায়নি, আবার চেষ্টা করুন';
+                      });
+                      return;
+                    }
+                    if (ctx.mounted) Navigator.pop(ctx);
+                    messengerKey.currentState?.showSnackBar(
+                        const SnackBar(content: Text('পিন বদলানো হয়েছে')));
+                  },
+            child: busy
+                ? const SizedBox(
+                    height: 18,
+                    width: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('বদলান'),
           ),
         ],
       ),
@@ -449,68 +476,48 @@ class _LoginScreen2State extends State<LoginScreen2> {
   }
 
   Future<void> _studentLogin() async {
-    final q = normSearch(idC.text);
-    if (q.isEmpty) {
+    if (idC.text.trim().isEmpty) {
       setState(() => error = 'নাম বা নম্বর লিখুন');
+      return;
+    }
+    if (spC.text.trim().isEmpty) {
+      setState(() => error = 'পিন লিখুন');
       return;
     }
     setState(() {
       busy = true;
       error = '';
     });
-    final ok = await data.ensureLoaded();
+    final err = await data.loginStudent(idC.text, spC.text.trim());
     if (!mounted) return;
     setState(() => busy = false);
-    if (!ok) {
-      setState(() => error = data.failMessage());
-      return;
-    }
-    final students = data.students;
-    var found = students
-        .where((s) =>
-            s['id'].toString() == q || normSearch(s['name'].toString()) == q)
-        .toList();
-    if (found.isEmpty) {
-      found = students
-          .where((s) => normSearch(s['name'].toString()).contains(q))
-          .toList();
-    }
-    if (found.isEmpty) {
-      setState(() => error = 'কোনো শিক্ষার্থী পাওয়া যায়নি');
-      return;
-    }
-    if (found.length > 1) {
-      setState(() => error = 'একাধিক নাম মিলেছে, পুরো নাম বা নম্বর লিখুন');
-      return;
-    }
-    final st = found.first;
-    if (spC.text.trim() != (st['pin'] ?? '1234').toString()) {
-      setState(() => error = 'পিন ভুল হয়েছে');
+    if (err != null) {
+      setState(() => error = err);
       return;
     }
     extra.isManager = false;
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
-        builder: (_) => StudentScreen(studentId: st['id'] as int),
+        builder: (_) => StudentScreen(studentId: data.studentId),
       ),
     );
   }
 
   Future<void> _managerLogin() async {
+    if (pinC.text.trim().isEmpty) {
+      setState(() => error = 'পিন লিখুন');
+      return;
+    }
     setState(() {
       busy = true;
       error = '';
     });
-    final ok = await data.ensureLoaded(needStudents: false, needConfig: true);
+    final err = await data.loginManager(pinC.text.trim());
     if (!mounted) return;
     setState(() => busy = false);
-    if (!ok) {
-      setState(() => error = data.failMessage());
-      return;
-    }
-    if (pinC.text.trim() != data.managerPin) {
-      setState(() => error = 'পিন ভুল হয়েছে');
+    if (err != null) {
+      setState(() => error = err);
       return;
     }
     extra.isManager = true;
