@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -188,7 +189,26 @@ Future<String?> pickOption(
 // অনলাইন ডেটা (Firestore) — সব ফোনে একই তথ্য
 // ---------------------------------------------------------------
 double balOf(Map<String, dynamic> s) =>
-    numOf(s['op']) + numOf(s['pd']) - numOf(s['pc']);
+    numOf(s['op']) + numOf(s['pd']) - numOf(s['pc']) - numOf(s['po']);
+
+// শিক্ষার্থীর দেখানোর নম্বর (না থাকলে ডেটাবেসের আইডিই নম্বর)
+int noOf(Map<String, dynamic> s) =>
+    (s['no'] as num?)?.toInt() ?? (s['id'] as num).toInt();
+
+// নতুন হিসাবে ফেরত যাবে এমন আগাম মিলের টাকা (যে বেলা খাওয়া হয়নি)
+double advanceRefund(Map<String, dynamic> s) {
+  final todayIso = isoOf(todayDate());
+  final meals = mapOf(s['meals']);
+  final eaten = mapOf(s['eaten']);
+  double refund = 0;
+  meals.forEach((k, v) {
+    if (k.compareTo(todayIso) < 0 || v.isEmpty) return;
+    final e = eaten[k] ?? '';
+    final ate = v.split('').where((c) => e.contains(c)).join();
+    refund += xPrice(xFlags(v)) - xPrice(xFlags(ate));
+  });
+  return refund;
+}
 
 int countEaten(Map<String, dynamic> s, String fromIso, String toIso) {
   final eaten = mapOf(s['eaten']);
@@ -209,6 +229,7 @@ void normalizeStudent(Map<String, dynamic> s) {
   s['op'] = numOf(s['op']);
   s['pd'] = numOf(s['pd']);
   s['pc'] = numOf(s['pc']);
+  s['po'] = numOf(s['po']);
   s['slots'] = (s['slots'] as num?)?.toInt() ?? 0;
   s['history'] = (s['history'] as List?)
           ?.map((e) => Map<String, dynamic>.from(e as Map))
@@ -221,21 +242,29 @@ class AppData extends ChangeNotifier {
   List<Map<String, dynamic>> notices = [];
   List<Map<String, dynamic>> periods = []; // ম্যানেজারের মোট হিসাবের ইতিহাস
   List<Map<String, dynamic>> halls = []; // সব হলের তালিকা {id, name}
+  List<Map<String, dynamic>> roster = []; // লগইনের জন্য শুধু নাম ও নম্বর
   Map<String, List<int>> schedule = copyDefaultSchedule();
-  List<int> dd = List<int>.filled(7, 0); // চলমান হিসাবে দিনভিত্তিক জমা
+  List<int> dd = List<int>.filled(15, 0); // চলমান হিসাবে দিনভিত্তিক জমা
   String? hallId;
   String hallName = '';
-  String managerPin = '1234';
   String managerRoom = '';
   String periodStart = isoOf(todayDate());
 
+  // ---- লগইন অবস্থা ----
+  String role = ''; // 'manager' | 'student' | '' (ঢোকেনি)
+  int studentId = 0;
+  bool hallSecured = false; // এই হল নতুন নিরাপদ ব্যবস্থায় এসেছে কিনা
+  String legacyPin = ''; // পুরোনো হলের ম্যানেজার পিন (একবার আপগ্রেডের জন্য)
+
   bool studentsLoaded = false;
   bool configLoaded = false;
+  bool rosterLoaded = false;
   bool hallsLoaded = false;
   bool dark = false; // শুধু এই ফোনের পছন্দ
   String lastError = ''; // অনলাইন সংযোগের শেষ সমস্যা
 
-  final List<StreamSubscription<dynamic>> _subs = [];
+  final List<StreamSubscription<dynamic>> _pub = [];
+  final List<StreamSubscription<dynamic>> _priv = [];
   StreamSubscription<dynamic>? _hallsSub;
 
   void _err(Object e) {
@@ -244,10 +273,28 @@ class AppData extends ChangeNotifier {
   }
 
   FirebaseFirestore get _fs => FirebaseFirestore.instance;
+  FirebaseAuth get _auth => FirebaseAuth.instance;
+  String get uid => _auth.currentUser?.uid ?? '';
+
   DocumentReference<Map<String, dynamic>> get _hall =>
       _fs.collection('halls').doc(hallId);
   CollectionReference<Map<String, dynamic>> get _stuCol =>
       _hall.collection('students');
+  DocumentReference<Map<String, dynamic>> get _sess =>
+      _hall.collection('sessions').doc(uid);
+
+  // ---- অদৃশ্য সাইন-ইন (Firebase Anonymous) ----
+  Future<bool> ensureAuth() async {
+    try {
+      if (_auth.currentUser == null) await _auth.signInAnonymously();
+      return true;
+    } catch (e) {
+      lastError =
+          'নিরাপদ সংযোগ চালু করা যায়নি। Firebase-এ Anonymous সাইন-ইন চালু আছে কিনা দেখুন।\n$e';
+      notifyListeners();
+      return false;
+    }
+  }
 
   // ---- সব হলের তালিকা (হল বাছার স্ক্রিনের জন্য) ----
   void startHallList() {
@@ -268,72 +315,56 @@ class AppData extends ChangeNotifier {
 
   // ---- হল বাছা / ছাড়া ----
   Future<void> selectHall(String id) async {
-    _stopHall();
+    await _stopHall();
     hallId = id;
     final p = await SharedPreferences.getInstance();
     await p.setString('hallId', id);
-    _startHall();
+    _startPublic();
     await extra.startFor(id);
     notifyListeners();
   }
 
   Future<void> leaveHall() async {
-    _stopHall();
+    await _stopHall();
     hallId = null;
     final p = await SharedPreferences.getInstance();
     await p.remove('hallId');
     notifyListeners();
   }
 
-  void _stopHall() {
-    for (final s in _subs) {
+  Future<void> _stopHall() async {
+    await logout(notify: false);
+    for (final s in _pub) {
       s.cancel();
     }
-    _subs.clear();
-    students = [];
-    notices = [];
-    periods = [];
-    studentsLoaded = false;
+    _pub.clear();
+    roster = [];
+    rosterLoaded = false;
     configLoaded = false;
     hallName = '';
-    managerPin = '1234';
     managerRoom = '';
+    hallSecured = false;
+    legacyPin = '';
     periodStart = isoOf(todayDate());
     schedule = copyDefaultSchedule();
-    dd = List<int>.filled(7, 0);
+    dd = List<int>.filled(15, 0);
     lastError = '';
     extra.reset();
   }
 
-  void _startHall() {
-    _subs.add(_stuCol.snapshots().listen((snap) {
-      final list = <Map<String, dynamic>>[];
-      for (final d in snap.docs) {
-        final s = Map<String, dynamic>.from(d.data());
-        normalizeStudent(s);
-        list.add(s);
-      }
-      list.sort((a, b) =>
-          ((a['id'] as num?) ?? 0).compareTo((b['id'] as num?) ?? 0));
-      students = list;
-      if (!snap.metadata.isFromCache || list.isNotEmpty) {
-        studentsLoaded = true;
-        lastError = '';
-      }
-      notifyListeners();
-    }, onError: _err));
-
-    _subs.add(_hall.snapshots().listen((doc) {
+  // সবার জন্য খোলা অংশ: হলের সেটিংস ও নামের তালিকা (পিন বা হিসাব নয়)
+  void _startPublic() {
+    _pub.add(_hall.snapshots().listen((doc) {
       if (!doc.exists) {
-        // হলটা মুছে গেছে (বা নেই): হল বাছার স্ক্রিনে ফেরা
         if (!doc.metadata.isFromCache) leaveHall();
         return;
       }
       final m = doc.data() ?? {};
       hallName = (m['name'] ?? '').toString();
-      managerPin = (m['managerPin'] ?? '1234').toString();
       managerRoom = (m['managerRoom'] ?? '').toString();
       periodStart = (m['periodStart'] ?? periodStart).toString();
+      hallSecured = m['secured'] == true;
+      legacyPin = (m['managerPin'] ?? '').toString();
       final sc = m['schedule'];
       if (sc is Map) {
         for (final k in ['b', 'l', 'd']) {
@@ -346,14 +377,29 @@ class AppData extends ChangeNotifier {
       final d = m['dd'];
       if (d is List) {
         dd = List<int>.generate(
-            7, (i) => i < d.length ? (d[i] as num).toInt() : 0);
+            15, (i) => i < d.length ? (d[i] as num).toInt() : 0);
       }
       configLoaded = true;
       lastError = '';
       notifyListeners();
     }, onError: _err));
 
-    _subs.add(_hall
+    _pub.add(_hall.collection('roster').snapshots().listen((snap) {
+      roster = snap.docs.map((d) => Map<String, dynamic>.from(d.data())).toList();
+      if (!snap.metadata.isFromCache || roster.isNotEmpty) rosterLoaded = true;
+      notifyListeners();
+    }, onError: _err));
+  }
+
+  // লগইনের পর খোলা অংশ: ম্যানেজার সব দেখে, শিক্ষার্থী শুধু নিজেরটা
+  void _startPrivate() {
+    for (final s in _priv) {
+      s.cancel();
+    }
+    _priv.clear();
+    studentsLoaded = false;
+
+    _priv.add(_hall
         .collection('notices')
         .orderBy('at')
         .snapshots()
@@ -366,31 +412,59 @@ class AppData extends ChangeNotifier {
       notifyListeners();
     }, onError: _err));
 
-    _subs.add(_hall
-        .collection('periods')
-        .orderBy('createdAt', descending: true)
-        .snapshots()
-        .listen((snap) {
-      periods = snap.docs.map((d) {
-        final m = Map<String, dynamic>.from(d.data());
-        m['id'] = d.id;
-        return m;
-      }).toList();
-      notifyListeners();
-    }, onError: _err));
+    if (role == 'manager') {
+      _priv.add(_stuCol.snapshots().listen((snap) {
+        final list = <Map<String, dynamic>>[];
+        for (final d in snap.docs) {
+          final s = Map<String, dynamic>.from(d.data());
+          normalizeStudent(s);
+          list.add(s);
+        }
+        list.sort((a, b) => noOf(a).compareTo(noOf(b)));
+        students = list;
+        if (!snap.metadata.isFromCache || list.isNotEmpty) {
+          studentsLoaded = true;
+          lastError = '';
+        }
+        notifyListeners();
+      }, onError: _err));
+
+      _priv.add(_hall
+          .collection('periods')
+          .orderBy('createdAt', descending: true)
+          .snapshots()
+          .listen((snap) {
+        periods = snap.docs.map((d) {
+          final m = Map<String, dynamic>.from(d.data());
+          m['id'] = d.id;
+          return m;
+        }).toList();
+        notifyListeners();
+      }, onError: _err));
+    } else if (role == 'student') {
+      _priv.add(_stuCol.doc('$studentId').snapshots().listen((doc) {
+        if (doc.exists) {
+          final s = Map<String, dynamic>.from(doc.data() ?? {});
+          normalizeStudent(s);
+          students = [s];
+        } else {
+          students = [];
+        }
+        studentsLoaded = true;
+        lastError = '';
+        notifyListeners();
+      }, onError: _err));
+    }
   }
 
-  Future<bool> ensureLoaded(
-      {bool needStudents = true, bool needConfig = false}) async {
-    bool ready() =>
-        (!needStudents || studentsLoaded) && (!needConfig || configLoaded);
+  Future<bool> _waitPublic() async {
     final end = DateTime.now().add(const Duration(seconds: 15));
     while (DateTime.now().isBefore(end)) {
-      if (ready()) return true;
-      if (lastError.isNotEmpty) break; // আসল সমস্যা ধরা পড়লে দেরি না করে জানানো
+      if (rosterLoaded && configLoaded) return true;
+      if (lastError.isNotEmpty) break;
       await Future.delayed(const Duration(milliseconds: 200));
     }
-    return ready();
+    return rosterLoaded && configLoaded;
   }
 
   String failMessage() {
@@ -398,6 +472,150 @@ class AppData extends ChangeNotifier {
       return 'সংযোগে সমস্যা:\n$lastError';
     }
     return 'তথ্য আনা যায়নি। ইন্টারনেট চালু করে আবার চেষ্টা করুন';
+  }
+
+  Map<String, dynamic> _sessionData(String r, String sid, String pin) => {
+        'role': r,
+        'sid': sid,
+        'pin': pin,
+        'at': DateTime.now().toIso8601String(),
+      };
+
+  // ---- লগইন (পিন ঠিক কিনা, Firestore-এর নিয়মই যাচাই করে) ----
+  Future<String?> loginStudent(String query, String pin) async {
+    if (!await ensureAuth()) return failMessage();
+    if (!await _waitPublic()) return failMessage();
+    final q = normSearch(query);
+    var found = roster
+        .where((s) =>
+            (s['no'] ?? s['id']).toString() == q ||
+            normSearch(s['name'].toString()) == q)
+        .toList();
+    if (found.isEmpty) {
+      found = roster
+          .where((s) => normSearch(s['name'].toString()).contains(q))
+          .toList();
+    }
+    if (found.isEmpty) return 'কোনো শিক্ষার্থী পাওয়া যায়নি';
+    if (found.length > 1) return 'একাধিক নাম মিলেছে, পুরো নাম বা নম্বর লিখুন';
+    if (!hallSecured) {
+      return 'এই হলের ম্যানেজার এখনো নতুন অ্যাপে ঢোকেননি। ম্যানেজারকে একবার ঢুকতে বলুন';
+    }
+    final id = (found.first['id'] as num).toInt();
+    try {
+      await _sess.set(_sessionData('student', '$id', pin));
+    } on FirebaseException catch (e) {
+      if (e.code == 'permission-denied') return 'পিন ভুল হয়েছে';
+      return 'সংযোগে সমস্যা: ${e.message}';
+    }
+    role = 'student';
+    studentId = id;
+    _startPrivate();
+    return null;
+  }
+
+  Future<String?> loginManager(String pin) async {
+    if (!await ensureAuth()) return failMessage();
+    if (!await _waitPublic()) return failMessage();
+    try {
+      await _sess.set(_sessionData('manager', '', pin));
+    } on FirebaseException catch (e) {
+      if (e.code != 'permission-denied') return 'সংযোগে সমস্যা: ${e.message}';
+      // পুরোনো (আপগ্রেড হয়নি এমন) হল: একবার নিজে থেকে নিরাপদ ব্যবস্থায় আনা
+      if (!hallSecured && legacyPin.isNotEmpty && legacyPin == pin) {
+        try {
+          await _migrateHall(pin);
+        } catch (err) {
+          return 'আপগ্রেড করা যায়নি: $err';
+        }
+        role = 'manager';
+        _startPrivate();
+        return null;
+      }
+      return 'পিন ভুল হয়েছে';
+    }
+    role = 'manager';
+    _startPrivate();
+    return null;
+  }
+
+  Future<void> openAsManager() async {
+    role = 'manager';
+    _startPrivate();
+    notifyListeners();
+  }
+
+  Future<void> logout({bool notify = true}) async {
+    if (role.isNotEmpty && hallId != null) {
+      try {
+        await _sess.delete();
+      } catch (_) {}
+    }
+    for (final s in _priv) {
+      s.cancel();
+    }
+    _priv.clear();
+    role = '';
+    studentId = 0;
+    students = [];
+    notices = [];
+    periods = [];
+    studentsLoaded = false;
+    if (notify) notifyListeners();
+  }
+
+  // বর্তমান পিন ঠিক আছে কিনা (পিন বদলানোর আগে)
+  Future<bool> verifyPin(String pin) async {
+    try {
+      await _sess.set(_sessionData(role, role == 'student' ? '$studentId' : '', pin));
+      return true;
+    } on FirebaseException {
+      return false;
+    }
+  }
+
+  // নিজের পিন বদলানো (ম্যানেজার বা শিক্ষার্থী)
+  Future<void> changeOwnPin(String newPin) async {
+    final id = role == 'student' ? '$studentId' : 'manager';
+    await _hall.collection('secrets').doc(id).set({'pin': newPin});
+  }
+
+  // ম্যানেজার শিক্ষার্থীর পিন নতুন করে বসান
+  Future<void> resetStudentPin(int id, String newPin) async {
+    await _hall.collection('secrets').doc('$id').set({'pin': newPin});
+  }
+
+  // ---- পুরোনো হলকে নিরাপদ ব্যবস্থায় আনা (একবার) ----
+  Future<void> _migrateHall(String pin) async {
+    final sec = _hall.collection('secrets');
+    await sec.doc('manager').set({'pin': pin});
+    await _sess.set(_sessionData('manager', '', pin));
+    role = 'manager';
+
+    final snap = await _stuCol.get();
+    WriteBatch b = _fs.batch();
+    int n = 0;
+    for (final d in snap.docs) {
+      final m = d.data();
+      final p = (m['pin'] ?? '1234').toString();
+      b.set(sec.doc(d.id), {'pin': p});
+      b.set(_hall.collection('roster').doc(d.id),
+          {'id': m['id'], 'no': m['no'] ?? m['id'], 'name': m['name']});
+      if (m.containsKey('pin')) {
+        b.update(d.reference, {'pin': FieldValue.delete()});
+      }
+      n += 3;
+      if (n >= 400) {
+        await b.commit();
+        b = _fs.batch();
+        n = 0;
+      }
+    }
+    await b.commit();
+    await _hall.set({
+      'managerPin': FieldValue.delete(),
+      'secured': true,
+    }, SetOptions(merge: true));
   }
 
   // ---- নতুন হল তৈরি ----
@@ -413,20 +631,27 @@ class AppData extends ChangeNotifier {
   Future<String?> createHall(String name, String pin,
       {bool importLegacy = false}) async {
     try {
+      if (!await ensureAuth()) return null;
       final ref = _fs.collection('halls').doc();
       await ref.set({
         'name': name,
-        'managerPin': pin,
+        'creator': uid,
+        'secured': true,
         'managerRoom': '',
         'periodStart': isoOf(todayDate()),
         'schedule': kDefaultSchedule,
-        'dd': List<int>.filled(7, 0),
+        'dd': List<int>.filled(15, 0),
         'prices': ExtraData.kDefaultPrices,
         'periodDays': 4,
         'mealOpen': false,
         'openAt': 0,
         'createdAt': DateTime.now().toIso8601String(),
       });
+      await ref.collection('secrets').doc('manager').set({'pin': pin});
+      await ref
+          .collection('sessions')
+          .doc(uid)
+          .set(_sessionData('manager', '', pin));
       if (importLegacy) await _importLegacy(ref);
       return ref.id;
     } catch (e) {
@@ -452,20 +677,26 @@ class AppData extends ChangeNotifier {
 
     WriteBatch b = _fs.batch();
     int n = 0;
-    Future<void> put(String col, QueryDocumentSnapshot<Map<String, dynamic>> d) async {
-      b.set(ref.collection(col).doc(d.id), d.data());
+    Future<void> tick() async {
       n++;
-      if (n % 400 == 0) {
+      if (n % 150 == 0) {
         await b.commit();
         b = _fs.batch();
       }
     }
 
     for (final d in (await _fs.collection('students').get()).docs) {
-      await put('students', d);
+      final m = Map<String, dynamic>.from(d.data());
+      final p = (m.remove('pin') ?? '1234').toString();
+      b.set(ref.collection('students').doc(d.id), m);
+      b.set(ref.collection('roster').doc(d.id),
+          {'id': m['id'], 'no': m['no'] ?? m['id'], 'name': m['name']});
+      b.set(ref.collection('secrets').doc(d.id), {'pin': p});
+      await tick();
     }
     for (final d in (await _fs.collection('notices').get()).docs) {
-      await put('notices', d);
+      b.set(ref.collection('notices').doc(d.id), d.data());
+      await tick();
     }
     await b.commit();
   }
@@ -473,19 +704,65 @@ class AppData extends ChangeNotifier {
   // ---- লেখা (অনলাইনে না থাকলেও ফোনে জমে থাকে, নেট এলে সিঙ্ক হয়) ----
   void saveStudent(Map<String, dynamic> s) {
     notifyListeners();
-    _stuCol.doc('${s['id']}').set(s).catchError(_err);
+    final doc = _stuCol.doc('${s['id']}');
+    if (role == 'student') {
+      // শিক্ষার্থী শুধু নিজের মিল, খরচ ও ইতিহাস বদলাতে পারে
+      doc.update({
+        'meals': s['meals'],
+        'pc': s['pc'],
+        'slots': s['slots'],
+        'history': s['history'],
+      }).catchError(_err);
+    } else {
+      doc.set(s).catchError(_err);
+    }
+  }
+
+  // নতুন শিক্ষার্থী: তথ্য + নামের তালিকা + প্রথম পিন (১২৩৪)
+  void addStudent(Map<String, dynamic> s, {String pin = '1234'}) {
+    final id = '${s['id']}';
+    final b = _fs.batch();
+    b.set(_stuCol.doc(id), s);
+    b.set(_hall.collection('roster').doc(id),
+        {'id': s['id'], 'no': s['no'] ?? s['id'], 'name': s['name']});
+    b.set(_hall.collection('secrets').doc(id), {'pin': pin});
+    b.commit().catchError(_err);
+    notifyListeners();
   }
 
   void deleteStudent(Map<String, dynamic> s) {
+    final id = '${s['id']}';
     students.remove(s);
     notifyListeners();
-    _stuCol.doc('${s['id']}').delete().catchError(_err);
+    final b = _fs.batch();
+    b.delete(_stuCol.doc(id));
+    b.delete(_hall.collection('roster').doc(id));
+    b.delete(_hall.collection('secrets').doc(id));
+    b.commit().catchError(_err);
+  }
+
+  // নাম ও দেখানোর নম্বর বদলানো (ডেটাবেসের আইডি একই থাকে, তাই পিন ও হিসাব ঠিক থাকে)
+  void renameStudent(Map<String, dynamic> s, String name, int no) {
+    final id = '${s['id']}';
+    s['name'] = name;
+    s['no'] = no;
+    notifyListeners();
+    final b = _fs.batch();
+    b.update(_stuCol.doc(id), {'name': name, 'no': no});
+    b.set(_hall.collection('roster').doc(id),
+        {'id': s['id'], 'no': no, 'name': name});
+    b.commit().catchError(_err);
+  }
+
+  // পাওনা মেটানো: শিক্ষার্থীকে টাকা ফেরত দেওয়ার পর হিসাব থেকে বাদ
+  void payOut(Map<String, dynamic> s, double amount) {
+    s['po'] = numOf(s['po']) + amount;
+    saveStudent(s);
   }
 
   void saveConfig() {
     notifyListeners();
     _hall.set({
-      'managerPin': managerPin,
       'managerRoom': managerRoom,
       'periodStart': periodStart,
       'schedule': schedule,
@@ -557,6 +834,7 @@ class AppData extends ChangeNotifier {
     int slotTotal = 0;
     double depTotal = 0;
     double costTotal = 0;
+    double poTotal = 0;
 
     for (final s in students) {
       final meals = mapOf(s['meals']);
@@ -572,7 +850,7 @@ class AppData extends ChangeNotifier {
         unused += v.length - ate.length;
       });
       final pc = numOf(s['pc']) - refund;
-      final cl = numOf(s['op']) + numOf(s['pd']) - pc;
+      final cl = numOf(s['op']) + numOf(s['pd']) - pc - numOf(s['po']);
       int slots = (s['slots'] as num?)?.toInt() ?? 0;
       if (slots > 0) stuCount++;
       slots = slots - unused;
@@ -587,6 +865,7 @@ class AppData extends ChangeNotifier {
         'op': numOf(s['op']),
         'pd': numOf(s['pd']),
         'pc': pc,
+        'po': numOf(s['po']),
         'cl': cl,
         'slots': slots,
         'ate': countEaten(s, fromIso, todayIso),
@@ -594,12 +873,14 @@ class AppData extends ChangeNotifier {
 
       depTotal += numOf(s['pd']);
       costTotal += pc;
+      poTotal += numOf(s['po']);
       slotTotal += slots;
 
       s['history'] = hist;
       s['op'] = 0.0;
       s['pd'] = 0.0;
       s['pc'] = 0.0;
+      s['po'] = 0.0;
       s['slots'] = 0;
       s['meals'] = <String, String>{};
       s['eaten'] = <String, String>{};
@@ -614,10 +895,11 @@ class AppData extends ChangeNotifier {
       'slots': slotTotal,
       'deposit': depTotal,
       'cost': costTotal,
+      'po': poTotal,
       'dd': dd.sublist(0, days),
       'createdAt': DateTime.now().toIso8601String(),
     });
-    dd = List<int>.filled(7, 0);
+    dd = List<int>.filled(15, 0);
     periodStart = todayIso;
     batch.set(_hall, {'periodStart': todayIso, 'dd': dd},
         SetOptions(merge: true));
@@ -719,7 +1001,8 @@ Widget noticeBanner({VoidCallback? onTap}) {
   );
 }
 
-Widget accountRows(double op, double pd, double pc, double cl) {
+Widget accountRows(double op, double pd, double pc, double cl,
+    {double po = 0}) {
   Widget row(String a, String b, {Color? color, bool bold = false}) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 2),
         child: Row(
@@ -738,6 +1021,7 @@ Widget accountRows(double op, double pd, double pc, double cl) {
       row('শুরুর ব্যালেন্স', money(op)),
       row('জমা', '+${money(pd)}'),
       row('মিল খরচ', '−${money(pc)}'),
+      if (po > 0) row('ফেরত দেওয়া', '−${money(po)}'),
       const Divider(height: 10),
       row(
         cl >= 0 ? 'পাওনা' : 'বকেয়া',
@@ -778,6 +1062,7 @@ Future<void> main() async {
   await Firebase.initializeApp(options: kFirebaseOptions);
   final prefs = await SharedPreferences.getInstance();
   data.dark = prefs.getBool('dark') ?? false;
+  await data.ensureAuth();
   data.startHallList();
   final saved = prefs.getString('hallId');
   if (saved != null) await data.selectHall(saved);
@@ -820,6 +1105,7 @@ class OssimApp extends StatelessWidget {
 // লগইন স্ক্রিন (শিক্ষার্থী / ম্যানেজার) এখন extras.dart-এর LoginScreen2
 
 void goLogin(BuildContext context) {
+  data.logout();
   Navigator.pushAndRemoveUntil(
     context,
     MaterialPageRoute(builder: (_) => const LoginScreen2()),
