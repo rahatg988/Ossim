@@ -601,6 +601,22 @@ Widget _hero(BuildContext context, Map<String, dynamic> s) {
             mini('খরচ', '−${money(numOf(s['pc']))}'),
           ],
         ),
+        if (numOf(s['po']) > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 10),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text('ফেরত পেয়েছেন',
+                    style: TextStyle(fontSize: 12, color: Colors.white70)),
+                Text(money(numOf(s['po'])),
+                    style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white)),
+              ],
+            ),
+          ),
       ],
     ),
   );
@@ -921,7 +937,8 @@ class HistoryScreen extends StatelessWidget {
                     ),
                     const SizedBox(height: 8),
                     accountRows(numOf(st['op']), numOf(st['pd']),
-                        numOf(st['pc']), balOf(st)),
+                        numOf(st['pc']), balOf(st),
+                        po: numOf(st['po'])),
                   ],
                 ),
               ),
@@ -973,7 +990,8 @@ class HistoryScreen extends StatelessWidget {
                             numOf(all[i]['op']),
                             numOf(all[i]['pd']),
                             numOf(all[i]['pc']),
-                            numOf(all[i]['cl'])),
+                            numOf(all[i]['cl']),
+                            po: numOf(all[i]['po'])),
                       ),
                     ],
                   ),
@@ -1209,9 +1227,11 @@ class _DashboardTab extends StatelessWidget {
         final p = periodInfo();
         double depSum = 0;
         double costSum = 0;
+        double poSum = 0;
         for (final s in st) {
           depSum += numOf(s['pd']);
           costSum += numOf(s['pc']);
+          poSum += numOf(s['po']);
         }
 
         return ListView(
@@ -1351,7 +1371,7 @@ class _DashboardTab extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(
-                      'এ পর্যন্ত: ${bnDigits('$onCount')} জন মিল চালু · জমা ${money(depSum)} · খরচ ${money(costSum)}',
+                      'এ পর্যন্ত: ${bnDigits('$onCount')} জন মিল চালু · জমা ${money(depSum)} · খরচ ${money(costSum)}${poSum > 0 ? ' · ফেরত ${money(poSum)}' : ''}',
                       style: TextStyle(fontSize: 12, color: mutC(context)),
                     ),
                   ),
@@ -1514,7 +1534,7 @@ class _AttendanceTabState extends State<_AttendanceTab> {
             : on
                 .where((s) =>
                     normSearch(s['name'].toString()).contains(nq) ||
-                    normSearch(s['id'].toString()).contains(nq))
+                    normSearch(noOf(s).toString()).contains(nq))
                 .toList();
         final ateCount = on.where(_ate).length;
         final lastDay = extra.periodDays - 1;
@@ -1618,7 +1638,7 @@ class _AttendanceTabState extends State<_AttendanceTab> {
                                       const EdgeInsets.symmetric(vertical: 10),
                                   child: Row(
                                     children: [
-                                      avatar(context, '${shown[i]['id']}'),
+                                      avatar(context, bnDigits('${noOf(shown[i])}')),
                                       const SizedBox(width: 12),
                                       Expanded(
                                         child: Column(
@@ -1702,7 +1722,7 @@ class _StudentsTabState extends State<_StudentsTab> {
         final list = data.students.where((s) {
           if (nq.isEmpty) return true;
           return normSearch(s['name'].toString()).contains(nq) ||
-              normSearch(s['id'].toString()).contains(nq) ||
+              normSearch(noOf(s).toString()).contains(nq) ||
               normSearch(s['room'].toString()).contains(nq);
         }).toList();
 
@@ -1763,7 +1783,7 @@ class _StudentsTabState extends State<_StudentsTab> {
             padding: const EdgeInsets.symmetric(vertical: 12),
             child: Row(
               children: [
-                avatar(context, '${s['id']}'),
+                avatar(context, bnDigits('${noOf(s)}')),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -1804,25 +1824,38 @@ class _StudentsTabState extends State<_StudentsTab> {
         if (open)
           Padding(
             padding: const EdgeInsets.only(left: 52, bottom: 12),
-            child: Row(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: () => showDepositDialog(context, s),
-                    icon: const Icon(Icons.payments_outlined, size: 18),
-                    label: const Text('জমা দিন'),
-                  ),
+                OutlinedButton.icon(
+                  onPressed: () => showDepositDialog(context, s),
+                  icon: const Icon(Icons.payments_outlined, size: 18),
+                  label: const Text('জমা দিন'),
                 ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                        backgroundColor: K.warn,
-                        foregroundColor: Colors.white),
-                    onPressed: () => showMealDialog(context, s),
-                    icon: const Icon(Icons.restaurant, size: 18),
-                    label: const Text('মিল যোগ'),
+                if (b > 0)
+                  OutlinedButton.icon(
+                    onPressed: () => showPayoutDialog(context, s),
+                    icon: const Icon(Icons.check_circle_outline, size: 18),
+                    label: const Text('পাওনা মেটান'),
                   ),
+                ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: K.warn, foregroundColor: Colors.white),
+                  onPressed: () => showMealDialog(context, s),
+                  icon: const Icon(Icons.restaurant, size: 18),
+                  label: const Text('মিল চালু/বন্ধ'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => showRenameDialog(context, s),
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('নাম/নম্বর'),
+                ),
+                IconButton(
+                  tooltip: 'পিন রিসেট',
+                  icon: Icon(Icons.lock_reset, color: priC(context)),
+                  onPressed: () => showResetPinDialog(context, s),
                 ),
                 IconButton(
                   icon: Icon(Icons.delete_outline, color: badC(context)),
@@ -1921,11 +1954,43 @@ class _SettingsTab extends StatelessWidget {
                   Text('কত দিন পরপর হিসাব শেষ করে নতুন হিসাব শুরু হবে',
                       style: TextStyle(fontSize: 13, color: mutC(context))),
                   const SizedBox(height: 10),
-                  segControl(
-                    context,
-                    [for (final n in [2, 3, 4]) '${bnDigits('$n')} দিন'],
-                    [2, 3, 4].indexOf(extra.periodDays),
-                    (i) => extra.setPeriodDays([2, 3, 4][i]),
+                  Row(
+                    children: [
+                      IconButton.filledTonal(
+                        onPressed: extra.periodDays > 1
+                            ? () => extra.setPeriodDays(extra.periodDays - 1)
+                            : null,
+                        icon: const Icon(Icons.remove),
+                      ),
+                      Expanded(
+                        child: Center(
+                          child: Text('${bnDigits('${extra.periodDays}')} দিন',
+                              style: TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.bold,
+                                  color: inkC(context))),
+                        ),
+                      ),
+                      IconButton.filledTonal(
+                        onPressed: extra.periodDays < 15
+                            ? () => extra.setPeriodDays(extra.periodDays + 1)
+                            : null,
+                        icon: const Icon(Icons.add),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text('১ থেকে ১৫ দিনের মধ্যে যেকোনো',
+                            style: TextStyle(
+                                fontSize: 12, color: mutC(context))),
+                      ),
+                      TextButton(
+                        onPressed: () => extra.setPeriodDays(4),
+                        child: const Text('ডিফল্ট (৪ দিন)'),
+                      ),
+                    ],
                   ),
                   Text(
                       'মিল চালুর সময় আজ থেকে পরের ${bnDigits('${extra.periodDays}')} দিনের বেলা বাছা যাবে।',
@@ -2057,25 +2122,30 @@ void showAddStudentDialog(BuildContext context) {
               final deposit =
                   double.tryParse(normSearch(depositC.text)) ?? 0.0;
               int nextId = 1;
+              int nextNo = 1;
               for (final s in data.students) {
                 final id = (s['id'] as num).toInt();
                 if (id >= nextId) nextId = id + 1;
+                final no = noOf(s);
+                if (no >= nextNo) nextNo = no + 1;
               }
               final s = <String, dynamic>{
                 'id': nextId,
+                'no': nextNo,
                 'name': name,
                 'year': yearC.text,
                 'room': roomC.text.trim(),
                 'op': 0.0,
                 'pd': deposit,
                 'pc': 0.0,
+                'po': 0.0,
                 'slots': 0,
                 'meals': <String, String>{},
                 'eaten': <String, String>{},
                 'history': <Map<String, dynamic>>[],
               };
               data.students.add(s);
-              data.saveStudent(s);
+              data.addStudent(s);
               if (deposit > 0) data.bumpDeposit(deposit);
               Navigator.pop(ctx);
             },
@@ -2143,12 +2213,21 @@ void confirmDeleteStudent(BuildContext context, Map<String, dynamic> student) {
 
 void confirmNewPeriod(BuildContext context) {
   final p = periodInfo();
+  int crN = 0;
+  double crS = 0;
+  for (final s in data.students) {
+    final bl = balOf(s) + advanceRefund(s);
+    if (bl > 0) {
+      crN++;
+      crS += bl;
+    }
+  }
   showDialog(
     context: context,
     builder: (ctx) => AlertDialog(
       title: Text('নতুন ${bnDigits('${p.days}')} দিনের হিসাব শুরু করবেন?'),
       content: Text(
-        'চলমান হিসাব (${shortDate(p.start)} – ${shortDate(p.end)}) ইতিহাসে জমা হবে: কতজন মিল চালু করেছে আর কত টাকা উঠেছে, তার মোট হিসাব ম্যানেজারের ইতিহাসে, আর প্রত্যেকের নিজের হিসাব তার নিজের ইতিহাসে।\n\nনতুন হিসাবে সবার মিল বন্ধ হয়ে যাবে (যে বেলা খাওয়া হয়নি তার টাকা ফেরত যাবে), আর মিলের খরচ ও পাওনা/বকেয়া সব ৳০ থেকে শুরু হবে। আগে নগদ টাকা মিটিয়ে নিন।',
+        'চলমান হিসাব (${shortDate(p.start)} – ${shortDate(p.end)}) ইতিহাসে জমা হবে: কতজন মিল চালু করেছে আর কত টাকা উঠেছে, তার মোট হিসাব ম্যানেজারের ইতিহাসে, আর প্রত্যেকের নিজের হিসাব তার নিজের ইতিহাসে।\n\nনতুন হিসাবে সবার মিল বন্ধ হয়ে যাবে (যে বেলা খাওয়া হয়নি তার টাকা ফেরত যাবে), আর মিলের খরচ ও পাওনা/বকেয়া সব ৳০ থেকে শুরু হবে। আগে নগদ টাকা মিটিয়ে নিন।${crN > 0 ? '\n\nএখনো ফেরত না দেওয়া পাওনা আছে ${bnDigits('$crN')} জনের, মোট ${money(crS)}। আগে "পাওনা মেটান" দিয়ে মিটিয়ে নিন।' : ''}',
       ),
       actions: [
         TextButton(
@@ -2258,78 +2337,7 @@ Future<void> editSchedule(BuildContext context, String key, String name) async {
 }
 
 void changeManagerPin(BuildContext context) {
-  final curC = TextEditingController();
-  final newC = TextEditingController();
-  final confC = TextEditingController();
-  String err = '';
-
-  showDialog(
-    context: context,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setD) => AlertDialog(
-        title: const Text('ম্যানেজার পিন পরিবর্তন'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: curC,
-                obscureText: true,
-                decoration: const InputDecoration(labelText: 'বর্তমান পিন'),
-              ),
-              TextField(
-                controller: newC,
-                obscureText: true,
-                decoration: const InputDecoration(
-                    labelText: 'নতুন পিন (কমপক্ষে ৪ অক্ষর)'),
-              ),
-              TextField(
-                controller: confC,
-                obscureText: true,
-                decoration:
-                    const InputDecoration(labelText: 'নতুন পিন আবার লিখুন'),
-              ),
-              if (err.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(err,
-                      style: const TextStyle(color: Colors.red, fontSize: 12)),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('বাতিল'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (curC.text.trim() != data.managerPin) {
-                setD(() => err = 'বর্তমান পিন ভুল');
-                return;
-              }
-              final np = newC.text.trim();
-              if (np.length < 4) {
-                setD(() => err = 'নতুন পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
-                return;
-              }
-              if (np != confC.text.trim()) {
-                setD(() => err = 'নতুন পিন মিলছে না');
-                return;
-              }
-              data.managerPin = np;
-              data.saveConfig();
-              Navigator.pop(ctx);
-              messengerKey.currentState?.showSnackBar(
-                  const SnackBar(content: Text('পিন বদলানো হয়েছে')));
-            },
-            child: const Text('বদলান'),
-          ),
-        ],
-      ),
-    ),
-  );
+  showOwnPinDialog(context, 'ম্যানেজার পিন পরিবর্তন');
 }
 
 void showPriceDialog(BuildContext context, List<String> item) {
@@ -2397,7 +2405,7 @@ class _StudentTableState extends State<StudentTable> {
   Comparable _val(Map<String, dynamic> s, int c) {
     switch (c) {
       case 0:
-        return (s['id'] as num).toInt();
+        return noOf(s);
       case 1:
         return s['name'].toString();
       case 2:
@@ -2578,7 +2586,7 @@ class _StudentTableState extends State<StudentTable> {
                   rows: [
                     for (final s in rows)
                       DataRow(cells: [
-                        cell(bnDigits('${s['id']}')),
+                        cell(bnDigits('${noOf(s)}')),
                         cell(s['name'].toString(), bold: true),
                         tapCell(s['year'].toString(), () => _editYear(s)),
                         tapCell(bnDigits(s['room'].toString()),
@@ -2782,7 +2790,8 @@ class PeriodHistoryScreen extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          Text('মিলের খরচ ${money(numOf(e['cost']))}',
+          Text(
+              'মিলের খরচ ${money(numOf(e['cost']))}${numOf(e['po']) > 0 ? ' · ফেরত দেওয়া ${money(numOf(e['po']))}' : ''}',
               style: TextStyle(fontSize: 13, color: mutC(context))),
           if (dd.isNotEmpty) ...[
             const SizedBox(height: 4),
@@ -2840,174 +2849,4 @@ class _HallPickerScreenState extends State<HallPickerScreen> {
               children: [
                 pageHeader(context, 'আপনার হল বেছে নিন',
                     sub: 'প্রতিটা হলের শিক্ষার্থী ও হিসাব আলাদা থাকে'),
-                searchField(
-                    context, 'হলের নাম দিয়ে খুঁজুন', (v) => setState(() => q = v)),
-                if (!data.hallsLoaded)
-                  const Padding(
-                    padding: EdgeInsets.all(28),
-                    child: Center(child: CircularProgressIndicator()),
-                  )
-                else if (list.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Center(
-                      child: Text(
-                        data.halls.isEmpty
-                            ? 'এখনও কোনো হল নেই।\nনিচের বাটনে নতুন হল তৈরি করুন।'
-                            : 'কোনো হল পাওয়া যায়নি।',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: mutC(context)),
-                      ),
-                    ),
-                  ),
-                for (final h in list)
-                  AppCard(
-                    onTap: () => _pick(h['id'].toString()),
-                    child: Row(
-                      children: [
-                        iconTile(context, Icons.apartment),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Text(h['name'].toString(),
-                              style: TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 16,
-                                  color: inkC(context))),
-                        ),
-                        Icon(Icons.chevron_right, color: mutC(context)),
-                      ],
-                    ),
-                  ),
-                const SizedBox(height: 6),
-                OutlinedButton.icon(
-                  onPressed: () => showCreateHallDialog(context),
-                  icon: const Icon(Icons.add),
-                  label: const Text('নতুন হল তৈরি করুন (ম্যানেজারের জন্য)'),
-                ),
-                Padding(
-                  padding: const EdgeInsets.only(top: 10),
-                  child: Text(
-                    'আপনার হল তালিকায় না থাকলে ম্যানেজার নতুন হল তৈরি করে শিক্ষার্থী যোগ করবেন।',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 12, color: mutC(context)),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-Future<void> showCreateHallDialog(BuildContext context) async {
-  final legacy = await data.legacyExists();
-  if (!context.mounted) return;
-  final nameC = TextEditingController();
-  final pinC = TextEditingController();
-  String err = '';
-  bool busy = false;
-  bool importLegacy = false;
-
-  showDialog(
-    context: context,
-    barrierDismissible: false,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setD) => AlertDialog(
-        title: const Text('নতুন হল তৈরি করুন'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'নিজের হলের শিক্ষার্থী ও হিসাব এখানে আলাদাভাবে তৈরি হবে।',
-                style: TextStyle(fontSize: 13),
-              ),
-              TextField(
-                controller: nameC,
-                decoration: const InputDecoration(labelText: 'হলের নাম'),
-              ),
-              TextField(
-                controller: pinC,
-                obscureText: true,
-                decoration: const InputDecoration(
-                    labelText: 'ম্যানেজার পিন (কমপক্ষে ৪ অক্ষর)'),
-              ),
-              if (legacy)
-                CheckboxListTile(
-                  contentPadding: EdgeInsets.zero,
-                  value: importLegacy,
-                  onChanged: busy
-                      ? null
-                      : (v) => setD(() => importLegacy = v ?? false),
-                  title: const Text('আগের ডেটা এই হলে আনুন',
-                      style: TextStyle(fontSize: 14)),
-                  subtitle: const Text(
-                      'আগের শিক্ষার্থী, নোটিশ, দাম ও সময় কপি হবে',
-                      style: TextStyle(fontSize: 12)),
-                ),
-              if (err.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(err,
-                      style: const TextStyle(color: Colors.red, fontSize: 12)),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: busy ? null : () => Navigator.pop(ctx),
-            child: const Text('বাতিল'),
-          ),
-          ElevatedButton(
-            onPressed: busy
-                ? null
-                : () async {
-                    final name = nameC.text.trim();
-                    final pin = pinC.text.trim();
-                    if (name.isEmpty) {
-                      setD(() => err = 'হলের নাম লিখুন');
-                      return;
-                    }
-                    if (pin.length < 4) {
-                      setD(() => err = 'পিন কমপক্ষে ৪ অক্ষরের হতে হবে');
-                      return;
-                    }
-                    setD(() {
-                      busy = true;
-                      err = '';
-                    });
-                    final id = await data.createHall(name, pin,
-                        importLegacy: importLegacy);
-                    if (id == null) {
-                      setD(() {
-                        busy = false;
-                        err = 'হল তৈরি করা যায়নি। ইন্টারনেট দেখে আবার চেষ্টা করুন';
-                      });
-                      return;
-                    }
-                    await data.selectHall(id);
-                    extra.isManager = true;
-                    if (ctx.mounted) Navigator.pop(ctx);
-                    if (context.mounted) {
-                      Navigator.pushAndRemoveUntil(
-                        context,
-                        MaterialPageRoute(builder: (_) => const HomeScreen()),
-                        (r) => false,
-                      );
-                    }
-                  },
-            child: busy
-                ? const SizedBox(
-                    height: 18,
-                    width: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('হল তৈরি করুন'),
-          ),
-        ],
-      ),
-    ),
-  );
-}
+                searchFi
